@@ -188,7 +188,7 @@ Shows each root promise's chain as a compact path:
 - `✓` `●` `○` `✗` `⊘` — completed, running, pending, failed, cancelled
 - Trailing `●1 ✓1` — aggregate counts
 
-### Expanded view (`ctrl+shift+b`)
+### Expanded view (`F4`)
 
 Shows a detailed tree below the editor:
 
@@ -200,7 +200,7 @@ Shows a detailed tree below the editor:
         └─→ ○ $ eval (on-success)
         └─→ ⊘ $ alert (on-failure — skipped)
 
-Press ctrl+shift+b to collapse
+Press F4 to collapse
 ```
 
 ---
@@ -224,4 +224,20 @@ Otherwise: **fire a promise.**
 - `promise-status` — non-blocking check
 - `promises-list` — list all promises
 - `promise-cancel` — cancel a running task
-- `ctrl+shift+b` — toggle expanded promise status bar
+- `F4` — toggle expanded promise status bar
+
+---
+
+## Examples
+
+Detailed patterns are in the `examples/` directory alongside this skill:
+
+| File | Covers |
+|------|--------|
+| [downloading.md](examples/downloading.md) | Basic download, download+process, conditional downloads, multi-file fan-out |
+| [pipelines.md](examples/pipelines.md) | Data processing, ML training, CI/CD, dynamic pipelines |
+| [parallel-work.md](examples/parallel-work.md) | Fan-out/gather, work-while-waiting, parallel analysis |
+| [failure-recovery.md](examples/failure-recovery.md) | Retry with backoff, cleanup, debug agent on failure, health check loops |
+| [sub-agents.md](examples/sub-agents.md) | Sub-agent orchestration, research+implement, bug investigation |
+
+Load an example on demand: `read(path="[skill_dir]/examples/downloading.md")`
