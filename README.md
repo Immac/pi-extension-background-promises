@@ -8,24 +8,24 @@ Non-blocking background promises for pi agent — fire off long tasks and keep w
 
 ## How It Works
 
-1. **`promise-create`** starts a download or command in the background and returns a promise ID immediately
+1. **`promise-create`** starts a command or download in the background and returns a promise ID immediately
 2. **Keep working** — the agent continues answering questions, editing files, running other tools
 3. **Auto-delivery** — when the task completes, `pi.sendMessage()` delivers the result as a message in the conversation
 4. **Pick it up** — the agent sees the completed result and continues
 
 ```
-Agent: "I'll download the model while I prepare the processing script."
-  → promise-create(download="https://...", name="download-model")
-  → "Started download: promise-123"
+Agent: "I'll run the test suite while I review the new feature code."
+  → promise-create(command="npm test", name="test-suite")
+  → "Started command: promise-456"
 
-Agent: "Now let me check the processing script..."
-  → read(path="./process.py")
+Agent: "Now let me check the new feature..."
+  → read(path="./src/new-feature.ts")
   → [works on other things]
 
-🔔 Promise "download-model" completed!     ← auto-delivered
-  Result: { path: "./model.bin", size: 1234567 }
+🔔 Promise "test-suite" completed!     ← auto-delivered
+  Result: { output: "PASS 42/42 tests" }
 
-Agent: "Download complete. Let me process it now."
+Agent: "All 42 tests pass. Let me review the new feature."
 ```
 
 ## Tools
@@ -60,12 +60,11 @@ Failed promises also notify:
 
 Messages use `customType: "promise-completion"` and queue as `followUp` — they never interrupt the agent mid-turn.
 
-### Smart Download Heuristics
+### Smart Await Heuristics
 
-`promise-await` uses intelligent stall detection:
-- **File growing**: Waits while file size increases
-- **Stalled**: Timeout only after no progress for N seconds
-- **Done**: Considers complete after grace period of no growth
+`promise-await` uses intelligent detection depending on promise type:
+- **Downloads**: File-growth based stall detection — polls file size, times out only after no progress for N seconds, considers done after a grace period of no growth
+- **Commands**: Simple await on the child process exit, returns stdout/stderr
 
 ### Status Bar (TUI)
 
