@@ -162,7 +162,7 @@ Variant D format: each chain is a root-indexed path showing type + status per no
 - `②→$●` = root 2's command running
 - Trailing `●1 ✓1` = aggregate counts
 
-**Expanded view** — press `ctrl+shift+b`:
+**Expanded view** — press `F4`:
 
 ```
  ⚡ Background Promises
@@ -172,7 +172,7 @@ Variant D format: each chain is a root-indexed path showing type + status per no
         └─→ ○ $ step3 (on-success)
         └─→ ⊘ $ notify-failure (on-failure — skipped)
 
-Press ctrl+shift+b to collapse
+Press F4 to collapse
 ```
 
 ### Smart Await Heuristics
@@ -257,6 +257,18 @@ pi install /home/immac/Repositories/ai_generation/tools/pi-extensions/bg-promise
 npm run validate    # TypeScript check
 npm test           # Integration tests
 ```
+
+## Skill Examples
+
+The [bg-promises skill](skills/bg-promises/SKILL.md) includes detailed usage examples in its `examples/` directory:
+
+| File | Covers |
+|------|--------|
+| [downloading.md](skills/bg-promises/examples/downloading.md) | Basic download, download+process, conditional downloads, multi-file fan-out |
+| [pipelines.md](skills/bg-promises/examples/pipelines.md) | Data processing, ML training, CI/CD, dynamic pipelines |
+| [parallel-work.md](skills/bg-promises/examples/parallel-work.md) | Fan-out/gather, work-while-waiting, parallel analysis |
+| [failure-recovery.md](skills/bg-promises/examples/failure-recovery.md) | Retry with backoff, cleanup, debug agent on failure, health check loops |
+| [sub-agents.md](skills/bg-promises/examples/sub-agents.md) | Sub-agent orchestration, research+implement, bug investigation |
 
 ---
 
