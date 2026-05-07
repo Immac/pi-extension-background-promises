@@ -4,128 +4,261 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](https://opensource.org/licenses/MIT)
 [![Pi Extension](https://img.shields.io/badge/Pi%20Extension-Tool-c084fc?logo=pi)](https://pi.dev)
 
-Non-blocking background promises for pi agent — fire off long tasks and keep working. Results arrive automatically as messages, no polling required.
+Non-blocking background promises for pi agent — **fire off long tasks and keep working.** Results arrive automatically as messages, no polling required.
+
+The core philosophy: **whenever you can work on something else while a task runs, use a promise.**
+
+---
 
 ## How It Works
 
-1. **`promise-create`** starts a command or download in the background and returns a promise ID immediately
-2. **Keep working** — the agent continues answering questions, editing files, running other tools
-3. **Auto-delivery** — when the task completes, `pi.sendMessage()` delivers the result as a message in the conversation
-4. **Pick it up** — the agent sees the completed result and continues
+1. **`promise-create`** starts a command or download in the background, returns a promise ID immediately
+2. **Keep working** — edit files, read code, answer questions, start more promises
+3. **Auto-delivery** — when each task completes, the result arrives as a conversation message
+4. **Chain** — attach follow-up steps with `promise-then` at any point, even after the root completes
 
 ```
-Agent: "I'll run the test suite while I review the new feature code."
-  → promise-create(command="npm test", name="test-suite")
-  → "Started command: promise-456"
+User: "Download the dataset and review the training script while it runs"
 
-Agent: "Now let me check the new feature..."
-  → read(path="./src/new-feature.ts")
-  → [works on other things]
+Agent:
+  → promise-create(download="https://...", path="./data.csv", name="download-data")
+  → "Started download: promise-123"
+  → read(path="./train.py")
+  → [reviews script, suggests improvements]
 
-🔔 Promise "test-suite" completed!     ← auto-delivered
-  Result: { output: "PASS 42/42 tests" }
+🔔 Promise "download-data" completed!    ← keeps working, no polling
+  Result: { path: "./data.csv", size: 1234567 }
 
-Agent: "All 42 tests pass. Let me review the new feature."
+Agent: "Download complete. Here's my review of train.py..."
 ```
+
+---
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `promise-create` | Start async task (download or command). Returns immediately. Result auto-delivers when done. Supports chaining via `then`. |
-| `promise-await` | Explicit blocking wait with smart download heuristics (stall detection) |
-| `promise-status` | Non-blocking status check, includes last result |
-| `promises-list` | List all tracked promises |
-| `promise-cancel` | Cancel a pending/running promise (kills child process) |
+| `promise-create` | Start a background task (command or download). Returns immediately. Result auto-delivers. Accepts `then` + `thenCondition` for initial chaining. |
+| `promise-then` | Chain a command or download **after** any existing promise. Multiple calls create a sequence. Supports `condition`: `always` (default), `on-success`, `on-failure`. |
+| `promise-await` | Block until a promise completes (rarely needed — results auto-deliver). Has smart download stall detection. |
+| `promise-status` | Check status without blocking. Returns last known result. |
+| `promises-list` | List all tracked promises and their current status. |
+| `promise-cancel` | Cancel a pending or running promise (kills child process). |
+
+---
+
+## 🧠 When to Use Promises — Decision Guide
+
+| Situation | Use a promise? |
+|-----------|---------------|
+| Running tests, linting, formatting | ✅ Yes — work on other things while they run |
+| Downloading files, models, data | ✅ Yes — read docs, review code meanwhile |
+| Data processing, ETL, training | ✅ Yes — chain eval/report with `promise-then` |
+| Installing packages, building | ✅ Yes — start, then continue reviewing |
+| Reading a file | ❌ No — too fast, just read directly |
+| Quick git operations | ❌ No — just run them inline |
+| You need the result to continue | ⚠️ Use `promise-then` to chain instead of `promise-await` |
+| You must block (interactive auth, user input) | ⚠️ Use `promise-await` as last resort |
+
+**Default to using promises.** If a task takes more than a few seconds, fire it and move on. The auto-delivery pattern means you never forget about it — the result will arrive when ready.
+
+---
 
 ## Features
 
 ### 🔔 Auto-Delivery on Completion
 
-When a background promise completes, the agent is automatically notified:
+All promises (root and chained) auto-deliver results:
 
 ```
-🔔 Promise "my-task" completed!
+🔔 Promise "train-model" completed!
 • Type: command
-• Result: { "output": "42 rows processed" }
+• Status: completed
+• Result: { "output": "Epoch 50/50 — loss: 0.023" }
+You can use promise-await("promise-xxx") for full structured details.
 ```
 
-Failed promises also notify:
+Failed promises also notify — you can chain a fallback with `condition="on-failure"`.
+
+### ⛓️ Chaining After the Fact (`promise-then`)
+
+The signature feature: **attach a follow-up to any existing promise at any time.**
 
 ```
-❌ Promise "my-task" failed!
-• Type: download
-• Error: curl exited with code 22
+promise-create(command="python preprocess.py", name="pipeline")
+→ promiseId: "promise-abc"
+
+# Later — chain more steps without blocking:
+promise-then(promiseId="promise-abc", command="python train.py")
+promise-then(promiseId="promise-abc", command="python eval.py")
 ```
 
-Messages use `customType: "promise-completion"` and queue as `followUp` — they never interrupt the agent mid-turn.
+Each call appends to the **end** of the chain. The result flows through: `preprocess → train → eval`.
 
-### Smart Await Heuristics
+**Why this matters:** You don't need to plan the full pipeline upfront. Start step 1, work on other things, and chain step 2 when you figure out what it should be. The chain auto-executes as each link completes.
 
-`promise-await` uses intelligent detection depending on promise type:
-- **Downloads**: File-growth based stall detection — polls file size, times out only after no progress for N seconds, considers done after a grace period of no growth
-- **Commands**: Simple await on the child process exit, returns stdout/stderr
+### 🎯 Conditional Chains
 
-### Status Bar (TUI)
+Control **when** a chained task runs:
 
-The extension adds a live promise status bar to the pi TUI footer that tracks all background promises.
+```
+# Only evaluate on training success
+promise-create(
+  command="python train.py",
+  then="python eval.py",
+  thenCondition="on-success"
+)
 
-**Compact view** (always visible in footer): Colored counts showing running (`●`), pending (`○`), completed (`✓`), and failed (`✗`) promises, plus the name of the currently running task.
+# Send alert only if something fails
+promise-then(
+  promiseId="promise-abc",
+  command="curl -X POST https://alerts.example.com/fail",
+  condition="on-failure"
+)
 
-**Expanded view** (toggle with `ctrl+shift+b`): A detailed widget below the editor listing every promise with status icon, type indicator (`↓` download / `$` command), name, and running result or error info.
+# Download a model checkpoint only after training succeeds
+promise-then(
+  promiseId="promise-abc",
+  download="https://example.com/checkpoint.pt",
+  path="./checkpoint.pt",
+  condition="on-success"
+)
+```
+
+If a condition isn't met, a "skipped" promise is created (status `cancelled`) with a message explaining why.
+
+### 🧵 Multi-Step Pipeline Pattern
+
+```
+# Fire steps without ever blocking:
+promise-create(command="step1", name="full-pipeline")
+promise-then(promiseId="promise-abc", command="step2", condition="on-success")
+promise-then(promiseId="promise-abc", command="step3", condition="on-success")
+promise-then(promiseId="promise-abc", command="notify-failure", condition="on-failure")
+
+# Meanwhile, do other work...
+read(path="./docs/api.md")
+edit(path="./src/app.ts", ...)
+```
+
+The status bar tracks all chains:
+
+```
+①→$●→$○→$○→$○  ●1
+```
+
+### 📊 Status Bar (TUI)
+
+The extension adds a live promise status bar to the pi TUI footer.
+
+**Compact view** — always visible:
+
+```
+①→$✓→$○ | ②→$●  ●1 ✓1
+```
+
+Variant D format: each chain is a root-indexed path showing type + status per node.
+- `①→$✓→$○` = root 1's command completed, next command pending
+- `②→$●` = root 2's command running
+- Trailing `●1 ✓1` = aggregate counts
+
+**Expanded view** — press `ctrl+shift+b`:
 
 ```
  ⚡ Background Promises
 
- ● $ train-model   Running: python train.py --epochs 50
- ✓ ↓ data.csv      {"path": "./data.csv", "size": 12345}
- ✗ $ preprocess    Command exited with code 1
+ ✓ $ full-pipeline
+   └─→ ✓ $ step2 (on-success)
+        └─→ ○ $ step3 (on-success)
+        └─→ ⊘ $ notify-failure (on-failure — skipped)
 
- Press ctrl+shift+b to collapse
+Press ctrl+shift+b to collapse
 ```
 
-The status bar updates automatically when promises are created, completed, fail, or cancelled.
+### Smart Await Heuristics
 
-### Chained Commands
-
-Use `then` to chain a command after another. Both steps auto-deliver results.
-
-```
-promise-create(
-  command="python train.py --epochs 10",
-  then="python eval.py --checkpoint ./checkpoints/latest.pt"
-)
-```
+`promise-await` is rarely needed but smart when used:
+- **Downloads**: File-growth detection — polls file size, times out only after no progress for N seconds, considers done after a grace period
+- **Commands**: Polls for process exit, returns stdout/stderr
 
 ### Process Cleanup
 
-- Cancel kills the child process with `SIGTERM`
-- No orphaned processes when pi exits or cancels
+- Cancel kills child process with `SIGTERM`
+- No orphaned processes when pi exits
+
+---
+
+## Workflow Examples
+
+### Parallel work (the ideal pattern)
+
+```
+User: "Run the test suite and while it runs, review the new API routes"
+
+Agent:
+  → promise-create(command="npm test", name="test-suite")          ← fire
+  → read(path="./src/routes/api.ts")                               ← work
+  → [identifies issues, suggests fixes]                            ← work
+
+🔔 Promise "test-suite" completed!                                 ← auto
+  Result: { output: "PASS 42/42" }
+
+  → "All 42 tests pass. About the API routes..."
+```
+
+### Multi-step pipeline with fallback
+
+```
+User: "Process the data, train a model, and evaluate it. If anything fails, send an alert."
+
+Agent:
+  → promise-create(command="python preprocess.py --input raw.csv",
+                   name="pipeline")
+  → promise-then(promiseId="promise-abc", command="python train.py --epochs 100",
+                 condition="on-success")
+  → promise-then(promiseId="promise-abc", command="python eval.py",
+                 condition="on-success")
+  → promise-then(promiseId="promise-abc",
+                 command="curl -X POST https://alerts/mypipeline/fail",
+                 condition="on-failure")
+
+  → [meanwhile, works on documentation, reviews code, etc.]
+```
+
+### Chained download + processing
+
+```
+Agent:
+  → promise-create(download="https://dataset.example.com/large.zip",
+                   path="./data/large.zip", name="get-data")
+  → promise-then(promiseId="promise-abc",
+                 command="unzip -o ./data/large.zip -d ./data/",
+                 condition="on-success")
+  → promise-then(promiseId="promise-abc",
+                 command="python preprocess.py --dir ./data/",
+                 condition="on-success")
+
+  → [meanwhile, reads paper, reviews architecture, etc.]
+```
+
+---
 
 ## Installation
 
 ```bash
-# Validate and test first
 npm run validate
 npm test
-
-# Install into pi
 pi install /home/immac/Repositories/ai_generation/tools/pi-extensions/bg-promises
 ```
 
 ## Development
 
 ```bash
-# Validate TypeScript
-npm run validate
-
-# Run integration tests
-npm test
+npm run validate    # TypeScript check
+npm test           # Integration tests
 ```
 
-## Repository
-
-- GitHub: [github.com/Immac/pi-extension-background-promises](https://github.com/Immac/pi-extension-background-promises)
+---
 
 ## License
 

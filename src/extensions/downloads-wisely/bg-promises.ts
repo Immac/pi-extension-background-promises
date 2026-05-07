@@ -1,11 +1,19 @@
 /**
  * Background Promise System
  *
- * Generic async background task system for pi agent.
+ * Default to using promises. Whenever you can work on something else while a
+ * task runs, fire a promise and keep going. Results auto-deliver — no polling,
+ * no blocking, no context-switching cost.
  * 
+ * Core workflow:
+ *   1. promise-create(command/download) → returns promiseId immediately
+ *   2. Chain follow-ups with promise-then(promiseId, command, condition?)
+ *   3. Keep working — results arrive automatically when ready
+ *
  * Tools:
  * - promise-create: Start async task in background, returns immediately
- * - promise-await: Wait with smart heuristics when actually needed
+ * - promise-then: Chain a task after an existing promise completes
+ * - promise-await: Wait with smart heuristics (rarely needed)
  * - promise-status: Check without blocking
  * - promises-list: List all tracked promises
  * - promise-cancel: Cancel a pending/running promise
@@ -13,7 +21,9 @@
  * Features:
  * - Downloads with smart stall detection
  * - Commands return output for agent use
- * - Chained promises (run command after another completes)
+ * - Post-hoc chaining (promise-then at any point, not just at creation)
+ * - Conditional chains (always, on-success, on-failure)
+ * - Linked-list chain tracking with status bar visualization
  * - Results flow through to agent context
  */
 
@@ -35,8 +45,14 @@ interface BackgroundPromise {
   targetPath?: string;
   url?: string;
   command?: string;
+  /** Chained task fields */
   thenCommand?: string;
+  thenDownload?: string;
+  thenPath?: string;
   thenName?: string;
+  thenCondition?: "always" | "on-success" | "on-failure";
+  /** ID of the chained promise (linked-list chain) */
+  thenPromiseId?: string;
   lastKnownSize: number;
   result?: unknown;
   previousResult?: unknown;
@@ -45,6 +61,8 @@ interface BackgroundPromise {
   completedAt?: number;
   /** Track child PID so we can kill on cancel */
   childPid?: number;
+  /** Prevent duplicate notification */
+  notified?: boolean;
 }
 
 interface AwaitOptions {
@@ -73,12 +91,43 @@ function setPromise(promise: BackgroundPromise): void {
 }
 
 // =============================================================================
+// Chain Helpers
+// =============================================================================
+
+/**
+ * Walk the linked list of thenPromiseId references to find the terminal
+ * (last) promise in the chain.
+ */
+function findTerminalPromise(promise: BackgroundPromise): BackgroundPromise {
+  let current = promise;
+  while (current.thenPromiseId) {
+    const next = promises.get(current.thenPromiseId);
+    if (!next) break; // child disappeared, stop here
+    current = next;
+  }
+  return current;
+}
+
+/**
+ * Collect all root promises — those not referenced as a child via thenPromiseId.
+ */
+function collectRootPromises(): BackgroundPromise[] {
+  const childIds = new Set<string>();
+  for (const [, p] of promises) {
+    if (p.thenPromiseId) childIds.add(p.thenPromiseId);
+  }
+  return Array.from(promises.values()).filter(p => !childIds.has(p.id));
+}
+
+// =============================================================================
 // Completion Notification (set by registerTools to deliver results to agent)
 // =============================================================================
 
 let _notifyCompletion: ((promise: BackgroundPromise) => void) | undefined;
 
 function notifyCompletion(promise: BackgroundPromise): void {
+  if (promise.notified) return;
+  promise.notified = true;
   try {
     _notifyCompletion?.(promise);
   } catch {
@@ -93,77 +142,183 @@ function notifyCompletion(promise: BackgroundPromise): void {
 let _statusBarCtx: { ui: any; theme: any } | undefined;
 let _expanded = false;
 
+const _STATUS_GLYPH: Record<string, string> = {
+  running: "\u25CF",
+  pending: "\u25CB",
+  completed: "\u2713",
+  failed: "\u2717",
+  cancelled: "\u2298",
+};
+
+const _STATUS_COLOR: Record<string, string> = {
+  running: "accent",
+  pending: "muted",
+  completed: "success",
+  failed: "error",
+  cancelled: "dim",
+};
+
+/**
+ * Build a compact chain representation for a single root promise.
+ * Variant D: ①→$✓→$○  (root→typeStatus→typeStatus…)
+ */
+function _chainCompact(root: BackgroundPromise, rootIndex: number, theme: any): string {
+  const parts: string[] = [];
+  let current: BackgroundPromise | undefined = root;
+  let isFirst = true;
+
+  while (current) {
+    const typeIcon = current.type === "download" ? "\u2193" : "$";
+    const glyph = _STATUS_GLYPH[current.status] || "?";
+    const color = _STATUS_COLOR[current.status] || "muted";
+
+    if (isFirst) {
+      parts.push(theme.fg("text", `${rootIndex}\u2192`));
+      parts.push(theme.fg(color, `${typeIcon}${glyph}`));
+      isFirst = false;
+    } else {
+      parts.push(theme.fg("dim", "\u2192"));
+      parts.push(theme.fg(color, `${typeIcon}${glyph}`));
+    }
+
+    current = current.thenPromiseId ? (promises.get(current.thenPromiseId) ?? undefined) : undefined;
+  }
+
+  return parts.join("");
+}
+
 function _getCompactStatus(theme: any): string | undefined {
   const all = Array.from(promises.values());
   if (all.length === 0) return undefined;
 
+  // Quick aggregate counts
   const running = all.filter(p => p.status === "running").length;
   const pending = all.filter(p => p.status === "pending").length;
   const completed = all.filter(p => p.status === "completed").length;
   const failed = all.filter(p => p.status === "failed").length;
 
-  const parts: string[] = [];
-  if (running > 0) parts.push(theme.fg("accent", `\u25CF${running}`));
-  if (pending > 0) parts.push(theme.fg("muted", `\u25CB${pending}`));
-  if (completed > 0) parts.push(theme.fg("success", `\u2713${completed}`));
-  if (failed > 0) parts.push(theme.fg("error", `\u2717${failed}`));
+  // Aggregate summary (always shown)
+  const aggParts: string[] = [];
+  if (running > 0) aggParts.push(theme.fg("accent", `\u25CF${running}`));
+  if (pending > 0) aggParts.push(theme.fg("muted", `\u25CB${pending}`));
+  if (completed > 0) aggParts.push(theme.fg("success", `\u2713${completed}`));
+  if (failed > 0) aggParts.push(theme.fg("error", `\u2717${failed}`));
 
-  const runningPromise = all.find(p => p.status === "running");
-  if (runningPromise) {
-    parts.push(theme.fg("dim", runningPromise.name));
+  // Build chain view — limit to 3 roots, prioritise running/pending first
+  const roots = collectRootPromises();
+  const priority: BackgroundPromise[] = [];
+  const rest: BackgroundPromise[] = [];
+  for (const r of roots) {
+    if (r.status === "running" || r.status === "pending") {
+      priority.push(r);
+    } else {
+      rest.push(r);
+    }
+  }
+  const sorted = [...priority, ...rest];
+  const visible = sorted.slice(0, 9);
+  const remaining = sorted.length - visible.length;
+
+  let chainStr = "";
+  if (visible.length > 0) {
+    const chainParts = visible.map((r, i) => _chainCompact(r, i + 1, theme));
+    chainStr = chainParts.join(" | ");
+    if (remaining > 0) {
+      chainStr += ` | ${theme.fg("dim", `+${remaining}`)}`;
+    }
   }
 
-  return parts.join(" ");
+  // Combine: F4 hint + chain view + aggregate counts
+  const hint = theme.fg("dim", "[F4]");
+  const middle = chainStr ? `${chainStr}  ${aggParts.join(" ")}` : aggParts.join(" ");
+  const result = `${hint} ${middle}`;
+  return result;
+}
+
+function _expandedLine(
+  promise: BackgroundPromise,
+  theme: any,
+  depth: number,
+  isLast: boolean
+): string {
+  const glyph = _STATUS_GLYPH[promise.status] || "?";
+  const color = _STATUS_COLOR[promise.status] || "muted";
+  const typeIcon = promise.type === "download" ? "\u2193" : "$";
+
+  const indent = depth === 0 ? " " : "  " + "\u2502  ".repeat(depth - 1) + (isLast ? "\u2514\u2500" : "\u251C\u2500");
+
+  let line = `${indent}${theme.fg(color, glyph)} ${theme.fg("dim", typeIcon)} ${theme.fg("text", promise.name)}`;
+
+  if (promise.thenCondition && depth > 0) {
+    line += ` ${theme.fg("dim", `(${promise.thenCondition})`)}`;
+  }
+
+  if (promise.status === "running") {
+    const info = (promise.command || promise.url || "").slice(0, 50);
+    if (info) line += ` ${theme.fg("muted", info)}`;
+  } else if (promise.status === "completed" && promise.result) {
+    const r = JSON.stringify(promise.result);
+    line += ` ${theme.fg("success", r.length > 40 ? r.slice(0, 37) + "..." : r)}`;
+  } else if (promise.status === "failed" && promise.error) {
+    const err = promise.error.length > 50 ? promise.error.slice(0, 47) + "..." : promise.error;
+    line += ` ${theme.fg("error", err)}`;
+  }
+
+  return line;
+}
+
+function _walkExpandedChain(
+  promise: BackgroundPromise,
+  theme: any,
+  depth: number,
+  lines: string[]
+): void {
+  // With linked-list model, there's at most one child via thenPromiseId
+  const child = promise.thenPromiseId ? promises.get(promise.thenPromiseId) ?? undefined : undefined;
+  if (child) {
+    lines.push(_expandedLine(child, theme, depth + 1, true));
+    _walkExpandedChain(child, theme, depth + 1, lines);
+  }
 }
 
 function _getExpandedLines(theme: any): string[] {
-  const all = Array.from(promises.values());
-  if (all.length === 0) {
+  const roots = collectRootPromises();
+  if (roots.length === 0) {
     return [theme.fg("dim", "\u2500 Background Promises \u2500 No active promises")];
   }
 
-  const statusChars: Record<string, string> = {
-    running: "\u25CF",
-    pending: "\u25CB",
-    completed: "\u2713",
-    failed: "\u2717",
-    cancelled: "\u2298",
-  };
-  const statusColors: Record<string, string> = {
-    running: "accent",
-    pending: "muted",
-    completed: "success",
-    failed: "error",
-    cancelled: "dim",
-  };
+  // Prioritise: running/pending first, then completed/failed
+  const priority: BackgroundPromise[] = [];
+  const rest: BackgroundPromise[] = [];
+  for (const r of roots) {
+    if (r.status === "running" || r.status === "pending") {
+      priority.push(r);
+    } else {
+      rest.push(r);
+    }
+  }
+  const sorted = [...priority, ...rest];
+
+  // Show at most 10 roots
+  const MAX_VISIBLE_ROOTS = 10;
+  const visible = sorted.slice(0, MAX_VISIBLE_ROOTS);
+  const remaining = sorted.length - visible.length;
 
   const lines: string[] = [];
   lines.push(theme.fg("accent", theme.bold(" \u26A1 Background Promises")));
   lines.push("");
 
-  for (const p of all) {
-    const icon = statusChars[p.status] || "?";
-    const color = statusColors[p.status] || "muted";
-    const typeIcon = p.type === "download" ? "\u2193" : "$";
+  for (const root of visible) {
+    lines.push(_expandedLine(root, theme, 0, false));
+    _walkExpandedChain(root, theme, 0, lines);
+  }
 
-    let line = ` ${theme.fg(color, icon)} ${theme.fg("dim", typeIcon)} ${theme.fg("text", p.name)}`;
-
-    if (p.status === "running") {
-      const info = (p.command || p.url || "").slice(0, 60);
-      if (info) line += ` ${theme.fg("muted", info)}`;
-    } else if (p.status === "completed" && p.result) {
-      const r = JSON.stringify(p.result);
-      line += ` ${theme.fg("success", r.length > 50 ? r.slice(0, 47) + "..." : r)}`;
-    } else if (p.status === "failed" && p.error) {
-      const err = p.error.length > 60 ? p.error.slice(0, 57) + "..." : p.error;
-      line += ` ${theme.fg("error", err)}`;
-    }
-
-    lines.push(line);
+  if (remaining > 0) {
+    lines.push(theme.fg("dim", `  \u22EF and ${remaining} more root promise${remaining === 1 ? "" : "s"}`));
   }
 
   lines.push("");
-  lines.push(theme.fg("dim", "Press ctrl+shift+b to collapse"));
+  lines.push(theme.fg("dim", "Press F4 to collapse"));
 
   return lines;
 }
@@ -409,26 +564,68 @@ async function runCommand(promise: BackgroundPromise): Promise<void> {
 // =============================================================================
 
 async function runChainedPromise(promise: BackgroundPromise): Promise<void> {
-  // Notify agent about completion before running chained command
+  // Notify agent about completion before running chained task
   notifyCompletion(promise);
-  if (!promise.thenCommand) return;
-  
+
+  const hasThen = !!(promise.thenCommand || promise.thenDownload);
+  if (!hasThen) return;
+
   // Wait a tick for the original promise to be fully settled
   await new Promise(r => setTimeout(r, 100));
-  
+
+  // ---- Condition check ----
+  if (promise.thenCondition && promise.thenCondition !== "always") {
+    const parentSuccess = promise.status === "completed";
+    const shouldSkip =
+      (promise.thenCondition === "on-success" && !parentSuccess) ||
+      (promise.thenCondition === "on-failure" && parentSuccess);
+
+    if (shouldSkip) {
+      const skipped: BackgroundPromise = {
+        id: generatePromiseId(),
+        name: promise.thenName ?? `skipped-${promise.name}`,
+        type: promise.thenDownload ? "download" : "command",
+        status: "cancelled",
+        command: promise.thenCommand,
+        url: promise.thenDownload,
+        targetPath: promise.thenPath,
+        error: `Skipped: parent ${promise.id} status ${promise.status} did not meet condition ${promise.thenCondition}`,
+        lastKnownSize: 0,
+        createdAt: Date.now(),
+      };
+      setPromise(skipped);
+      notifyCompletion(skipped);
+      _updateStatusBar();
+      return;
+    }
+  }
+
+  // ---- Create chained promise ----
+  const isDownload = !!promise.thenDownload;
   const chained: BackgroundPromise = {
     id: generatePromiseId(),
     name: promise.thenName ?? `chained from ${promise.name}`,
-    type: "command",
+    type: isDownload ? "download" : "command",
     status: "pending",
     command: promise.thenCommand,
+    url: promise.thenDownload,
+    targetPath: promise.thenPath,
     previousResult: promise.result,
     lastKnownSize: 0,
     createdAt: Date.now(),
   };
-  
+
+  // Link parent → child
+  promise.thenPromiseId = chained.id;
+  setPromise(promise);
   setPromise(chained);
-  runCommand(chained);
+  _updateStatusBar();
+
+  if (isDownload) {
+    runDownload(chained);
+  } else {
+    runCommand(chained);
+  }
 }
 
 // =============================================================================
@@ -512,7 +709,22 @@ function registerTools(pi: ExtensionAPI): void {
       _expanded = !_expanded;
       _updateStatusBar({ ui: ctx.ui, theme: ctx.ui.theme });
       if (_expanded) {
-        ctx.ui.notify("Promise status expanded \u2014 ctrl+shift+b to collapse", "info");
+        ctx.ui.notify("Promise status expanded \u2014 F4 to collapse", "info");
+      } else {
+        ctx.ui.notify("Promise status collapsed \u2014 F4 to expand", "info");
+      }
+    },
+  });
+  // F4 is the primary toggle (terminals don't intercept function keys)
+  pi.registerShortcut("f4", {
+    description: "Toggle expanded promise status bar",
+    handler: async (ctx) => {
+      _expanded = !_expanded;
+      _updateStatusBar({ ui: ctx.ui, theme: ctx.ui.theme });
+      if (_expanded) {
+        ctx.ui.notify("Promise status expanded \u2014 F4 to collapse", "info");
+      } else {
+        ctx.ui.notify("Promise status collapsed \u2014 F4 to expand", "info");
       }
     },
   });
@@ -525,18 +737,20 @@ function registerTools(pi: ExtensionAPI): void {
       name: "promise-create",
       label: "Promise Create",
       description: "Start an async task in background. Returns immediately with a promise ID. You can continue working on other tasks while it runs. When the promise completes, you'll be automatically notified with the result. Use promise-await for explicit blocking. Supports chaining with 'then' parameter.",
-      promptSnippet: "Start a background task (download or command) and continue working",
+      promptSnippet: "Start a background task and keep working — results auto-deliver",
       promptGuidelines: [
-        "Use promise-create to start long-running tasks in the background. You get a promiseId immediately and can continue other work without blocking.",
-        "When a promise completes, a 🔔 notification message is automatically delivered. You do not need to poll or await unless you need the result immediately.",
+        "DEFAULT TO USING PROMISES. If a task takes more than a couple seconds, fire promise-create and keep working on other things.",
+        "You get a promiseId immediately and can continue other work without blocking — edit files, read code, answer questions, start more promises.",
+        "When a promise completes, a 🔔 notification message is automatically delivered. You do NOT need to poll or await.",
         "Use the 'then' parameter to chain a command that runs automatically after the first completes.",
-        "Use promise-await(promiseId) only when you explicitly need the result before continuing with other work.",
+        "Do NOT use promise-await unless you have absolutely no other work to do. Chain follow-ups with promise-then instead.",
       ],
       parameters: Type.Object({
         download: Type.Optional(Type.String({ description: "URL to download" })),
         path: Type.Optional(Type.String({ description: "File path to save to" })),
         command: Type.Optional(Type.String({ description: "Shell command to execute in background" })),
         then: Type.Optional(Type.String({ description: "Command to run after this one completes (chain)" })),
+        thenCondition: Type.Optional(Type.String({ description: "Chain condition: 'always' (default), 'on-success', or 'on-failure'" })),
         name: Type.Optional(Type.String({ description: "Optional name for this promise" })),
       }),
       async execute(_toolCallId: string, args: {
@@ -544,10 +758,13 @@ function registerTools(pi: ExtensionAPI): void {
         path?: string;
         command?: string;
         then?: string;
+        thenCondition?: string;
         name?: string;
       }) {
         const isDownload = !!args.download;
         const name = args.name ?? (isDownload ? "download" : "command");
+
+        const thenCondition = (args.thenCondition as "always" | "on-success" | "on-failure" | undefined) ?? "always";
 
         const promise: BackgroundPromise = {
           id: generatePromiseId(),
@@ -559,6 +776,7 @@ function registerTools(pi: ExtensionAPI): void {
           command: args.command,
           thenCommand: args.then,
           thenName: args.then ? `then-${name}` : undefined,
+          thenCondition: args.then ? thenCondition : undefined,
           lastKnownSize: 0,
           createdAt: Date.now(),
         };
@@ -574,13 +792,14 @@ function registerTools(pi: ExtensionAPI): void {
         // Update status bar for the new promise
         _updateStatusBar();
 
-        const text = args.then 
-          ? `Started ${promise.type}: ${promise.id} (will chain to: ${args.then})`
-          : `Started ${promise.type}: ${promise.id}`;
+        const chainInfo = args.then
+          ? ` (will chain to: ${args.then} [${thenCondition}])`
+          : "";
+        const text = `Started ${promise.type}: ${promise.id}${chainInfo}`;
 
         return {
           content: [{ type: "text", text }],
-          details: { promiseId: promise.id, name: promise.name, type: promise.type, status: "started", willChain: !!args.then },
+          details: { promiseId: promise.id, name: promise.name, type: promise.type, status: "started", willChain: !!args.then, thenCondition },
         };
       },
     })
@@ -594,10 +813,12 @@ function registerTools(pi: ExtensionAPI): void {
       name: "promise-await",
       label: "Promise Await",
       description: "Wait for a background promise to complete. Returns result for agent use. Uses smart heuristics for downloads (growth detection) or simple await for commands.",
-      promptSnippet: "Block until a background promise completes (usually not needed — results auto-deliver)",
+      promptSnippet: "Block until a background promise completes (last resort — results auto-deliver)",
       promptGuidelines: [
-        "You generally do NOT need to call promise-await after promise-create. Results are automatically delivered as messages when the promise completes.",
-        "Only use promise-await when you need the result immediately before continuing, or to get full structured details from the details field.",
+        "You generally do NOT need to call promise-await. Results auto-deliver as messages.",
+        "Before using promise-await, ask yourself: can I work on something else? If yes, do that instead. The result will arrive.",
+        "Only use promise-await when you have literally no other work to do and the result is blocking — or to get full structured details (details field).",
+        "If you need to chain work after a promise, use promise-then(promiseId, command) instead of awaiting.",
       ],
       parameters: Type.Object({
         promiseId: Type.String({ description: "ID returned by promise-create" }),
@@ -827,6 +1048,105 @@ function registerTools(pi: ExtensionAPI): void {
       },
     })
   );
+
+  // ---------------------------------------------------------------------
+  // promise-then: Chain a task to run after an existing promise completes
+  // ---------------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "promise-then",
+      label: "Promise Then",
+      description: "Chain a command or download to run after an existing promise completes. Follows the chain to the end — multiple then calls create a sequence. If the target promise is already completed, the chained task runs immediately (subject to condition). Supports conditional execution with always, on-success, on-failure.",
+      promptSnippet: "Chain a task after an existing promise — no blocking needed",
+      promptGuidelines: [
+        "Use promise-then to chain a task after a previously created promise. This is PREFERRED over promise-await — you don't block, the chain auto-executes.",
+        "Multiple promise-then calls on the same promise create a sequential chain (each appends at the end).",
+        "Use condition='on-success' or condition='on-failure' to control when the chain runs.",
+        "If the target promise is already completed, the chained task runs immediately (subject to condition).",
+        "Use promise-then instead of promise-await whenever possible. Let the chain handle sequencing while you work on other things.",
+      ],
+      parameters: Type.Object({
+        promiseId: Type.String({ description: "ID of an existing promise (from promise-create)" }),
+        command: Type.Optional(Type.String({ description: "Shell command to run after the target promise completes" })),
+        download: Type.Optional(Type.String({ description: "URL to download after the target promise completes" })),
+        path: Type.Optional(Type.String({ description: "File path to save download to (required when using download)" })),
+        name: Type.Optional(Type.String({ description: "Optional name for this chained promise" })),
+        condition: Type.Optional(Type.String({ description: "When to run: 'always' (default), 'on-success', or 'on-failure'" })),
+      }),
+      async execute(_toolCallId: string, args: {
+        promiseId: string;
+        command?: string;
+        download?: string;
+        path?: string;
+        name?: string;
+        condition?: string;
+      }) {
+        // ---- Validate target ----
+        const promise = getPromise(args.promiseId);
+        if (!promise) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return { content: [{ type: "text", text: `Promise not found: ${args.promiseId}` }], details: { success: false, error: `Promise not found: ${args.promiseId}` } as any, isError: true };
+        }
+        if (promise.status === "cancelled") {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return { content: [{ type: "text", text: "Cannot chain to cancelled promise" }], details: { success: false, error: "Promise is cancelled" } as any, isError: true };
+        }
+        if (!args.command && !args.download) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return { content: [{ type: "text", text: "Either command or download must be provided" }], details: { success: false, error: "Missing command or download" } as any, isError: true };
+        }
+        if (args.command && args.download) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return { content: [{ type: "text", text: "Provide either command or download, not both" }], details: { success: false, error: "Both command and download provided" } as any, isError: true };
+        }
+        if (args.download && !args.path) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return { content: [{ type: "text", text: "path is required when downloading" }], details: { success: false, error: "Missing path for download" } as any, isError: true };
+        }
+
+        const validConditions = ["always", "on-success", "on-failure"];
+        const condition = (args.condition ?? "always") as "always" | "on-success" | "on-failure";
+        if (!validConditions.includes(condition)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return { content: [{ type: "text", text: `Invalid condition: ${args.condition}. Use: always, on-success, on-failure` }], details: { success: false, error: `Invalid condition: ${args.condition}` } as any, isError: true };
+        }
+
+        // ---- Walk chain to find terminal (last) promise ----
+        const terminal = findTerminalPromise(promise);
+
+        // ---- Attach new chain to terminal ----
+        terminal.thenCommand = args.command;
+        terminal.thenDownload = args.download;
+        terminal.thenPath = args.path;
+        terminal.thenName = args.name ?? `then-${terminal.name}`;
+        terminal.thenCondition = condition;
+        setPromise(terminal);
+
+        // ---- If terminal is already settled, run chained task immediately ----
+        const isSettled = terminal.status === "completed" || terminal.status === "failed" || terminal.status === "cancelled";
+        if (isSettled) {
+          runChainedPromise(terminal);
+        }
+
+        _updateStatusBar();
+
+        const actionType = args.download ? "download" : "command";
+        return {
+          content: [{ type: "text", text: `Chained ${actionType} to ${terminal.id} (condition: ${condition})` }],
+          details: {
+            success: true,
+            error: "",
+            parentId: terminal.id,
+            command: args.command,
+            download: args.download,
+            path: args.path,
+            name: args.name,
+            condition,
+          },
+        };
+      },
+    })
+  );
 }
 
 // =============================================================================
@@ -836,3 +1156,6 @@ function registerTools(pi: ExtensionAPI): void {
 export default function (pi: ExtensionAPI) {
   registerTools(pi);
 }
+
+// Exported for testing
+export { findTerminalPromise, collectRootPromises };

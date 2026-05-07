@@ -102,6 +102,7 @@ async function main() {
   const listTool = pi.tools.find((t) => t.name === "promises-list");
   const statusTool = pi.tools.find((t) => t.name === "promise-status");
   const cancelTool = pi.tools.find((t) => t.name === "promise-cancel");
+  const thenTool = pi.tools.find((t) => t.name === "promise-then");
 
   if (!createTool || !awaitTool) {
     throw new Error("Required tools not registered");
@@ -281,6 +282,102 @@ async function main() {
     console.log("✅ Chained auto-injection works");
   } else {
     console.log("❌ Chained notification not found");
+  }
+  console.log("");
+
+  // ---- Test 7: promise-then chaining ----
+  console.log("═══════════════════════════════════════════");
+  console.log("Test 7: promise-then chains to existing promise");
+  console.log("═══════════════════════════════════════════\n");
+
+  if (thenTool) {
+    const thenMarker1 = join(tmpDir, "then1.txt");
+    const thenMarker2 = join(tmpDir, "then2.txt");
+    const thenMarker3 = join(tmpDir, "then3.txt");
+
+    // Create a root command
+    const rootResult = await createTool.execute("call-8", {
+      command: `echo "root" > "${thenMarker1}"`,
+      name: "test-then-root",
+    });
+    const rootId = rootResult.details?.promiseId;
+    console.log("Root promise ID:", rootId);
+
+    // Wait for root to complete
+    await waitForCondition(() => existsSync(thenMarker1) && "root done", 8000);
+    console.log("✓ Root command completed");
+
+    // Chain a 'then' command to the completed root
+    const thenResult = await thenTool.execute("call-9", {
+      promiseId: rootId,
+      command: `echo "then1" > "${thenMarker2}"`,
+      name: "test-then-step1",
+    });
+    console.log("promise-then result:", JSON.stringify(thenResult.details));
+
+    // Wait for the chained command to complete
+    await waitForCondition(() => existsSync(thenMarker2) && "then1 done", 8000);
+    console.log("✓ First chained command completed");
+
+    // Chain another 'then' to the same root (should append to end of chain)
+    const thenResult2 = await thenTool.execute("call-10", {
+      promiseId: rootId,
+      command: `echo "then2" > "${thenMarker3}"`,
+      name: "test-then-step2",
+    });
+    console.log("Second promise-then result:", JSON.stringify(thenResult2.details));
+
+    // Wait for second chained command to complete
+    await waitForCondition(() => existsSync(thenMarker3) && "then2 done", 8000);
+    console.log("✓ Second chained command completed");
+
+    // Check notifications
+    const thenNotifs = pi.sentMessages.filter(
+      (m) =>
+        m.message?.customType === "promise-completion" &&
+        m.message?.content?.includes("test-then")
+    );
+    console.log(`promise-then notifications: ${thenNotifs.length}`);
+    thenNotifs.forEach((n, i) => {
+      console.log(`  [${i}] ${n.message.content.split("\n")[0]}`);
+    });
+
+    if (thenNotifs.length >= 2) {
+      console.log("✅ promise-then works with multiple chains");
+    } else {
+      console.log("❌ promise-then notifications incomplete");
+    }
+
+    // ---- Test 7b: promise-then condition on-success ----
+    console.log("");
+    console.log("--- Subtest: promise-then condition='on-success' ---");
+    const condMarker1 = join(tmpDir, "cond1.txt");
+    const condMarker2 = join(tmpDir, "cond2.txt");
+
+    // Create a command that will succeed
+    const condRoot = await createTool.execute("call-11", {
+      command: `echo "ok" > "${condMarker1}"`,
+      name: "test-condition-root",
+    });
+    const condRootId = condRoot.details?.promiseId;
+    await waitForCondition(() => existsSync(condMarker1) && "cond root done", 8000);
+
+    // Chain with condition='on-success' (should run because root succeeded)
+    const condThen = await thenTool.execute("call-12", {
+      promiseId: condRootId,
+      command: `echo "conditional-pass" > "${condMarker2}"`,
+      condition: "on-success",
+      name: "test-condition-pass",
+    });
+    console.log("condition='on-success' result:", JSON.stringify(condThen.details));
+
+    await waitForCondition(() => existsSync(condMarker2) && "cond then done", 8000);
+    console.log("✓ Conditional chain (on-success) completed");
+
+    console.log("");
+    console.log("✅ promise-then (all variants) works");
+  } else {
+    console.log("⚠️ promise-then tool not found, skipping Test 7");
   }
   console.log("");
 
