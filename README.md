@@ -239,7 +239,8 @@ Press F4 to collapse
 ### Process Cleanup
 
 - Cancel kills child process with `SIGTERM`
-- No orphaned processes when pi exits
+- On pi shutdown (`session_shutdown`), all running/pending promises are automatically cancelled, child processes killed, and timers cleaned up — no orphaned processes left behind
+- Cancelled promises get status `cancelled` with reason `"pi exited — session ended"`
 
 ---
 

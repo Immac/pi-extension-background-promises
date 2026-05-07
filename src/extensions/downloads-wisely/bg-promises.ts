@@ -54,6 +54,7 @@ interface BackgroundPromise {
   /** ID of the chained promise (linked-list chain) */
   thenPromiseId?: string;
   lastKnownSize: number;
+  totalSize?: number;
   result?: unknown;
   previousResult?: unknown;
   error?: string;
@@ -146,6 +147,15 @@ function buildChainText(root: BackgroundPromise, terminalId?: string): string[] 
       line += ` [${current.thenCondition}]`;
     }
 
+    // Show download progress
+    if (current.type === "download" && current.status === "running" && current.totalSize && current.totalSize > 0) {
+      const pct = Math.round((current.lastKnownSize / current.totalSize) * 100);
+      const bar = _progressBar(pct);
+      const dl = (current.lastKnownSize / 1024).toFixed(0);
+      const tot = (current.totalSize / 1024).toFixed(0);
+      line += ` ${bar} ${pct}% (${dl}KB/${tot}KB)`;
+    }
+
     // Show cancellation reason
     if (current.status === "cancelled" && current.error) {
       const reason = current.error.length > 70 ? current.error.slice(0, 67) + "..." : current.error;
@@ -232,6 +242,7 @@ function notifyCompletion(promise: BackgroundPromise): void {
 
 let _statusBarCtx: { ui: any; theme: any } | undefined;
 let _expanded = false;
+const _progressTimers = new Map<string, ReturnType<typeof setInterval>>();
 
 const _STATUS_GLYPH: Record<string, string> = {
   running: "\u25CF",
@@ -249,6 +260,11 @@ const _STATUS_COLOR: Record<string, string> = {
   cancelled: "dim",
 };
 
+function _progressBar(pct: number, width = 8): string {
+  const filled = Math.round((pct / 100) * width);
+  return "\u2588".repeat(filled) + "\u2592".repeat(width - filled);
+}
+
 /**
  * Build a compact chain representation for a single root promise.
  * Variant D: ①→$✓→$○  (root→typeStatus→typeStatus…)
@@ -263,13 +279,20 @@ function _chainCompact(root: BackgroundPromise, rootIndex: number, theme: any): 
     const glyph = _STATUS_GLYPH[current.status] || "?";
     const color = _STATUS_COLOR[current.status] || "muted";
 
+    // For running downloads with known total, show percentage suffix
+    let pctSuffix = "";
+    if (current.type === "download" && current.status === "running" && current.totalSize && current.totalSize > 0) {
+      const pct = Math.round((current.lastKnownSize / current.totalSize) * 100);
+      pctSuffix = ` ${Math.min(pct, 99)}%`;
+    }
+
     if (isFirst) {
       parts.push(theme.fg("text", `${rootIndex}\u2192`));
-      parts.push(theme.fg(color, `${typeIcon}${glyph}`));
+      parts.push(theme.fg(color, `${typeIcon}${glyph}${pctSuffix}`));
       isFirst = false;
     } else {
       parts.push(theme.fg("dim", "\u2192"));
-      parts.push(theme.fg(color, `${typeIcon}${glyph}`));
+      parts.push(theme.fg(color, `${typeIcon}${glyph}${pctSuffix}`));
     }
 
     current = current.thenPromiseId ? (promises.get(current.thenPromiseId) ?? undefined) : undefined;
@@ -345,8 +368,16 @@ function _expandedLine(
   }
 
   if (promise.status === "running") {
-    const info = (promise.command || promise.url || "").slice(0, 50);
-    if (info) line += ` ${theme.fg("muted", info)}`;
+    if (promise.type === "download" && promise.totalSize && promise.totalSize > 0) {
+      const pct = Math.round((promise.lastKnownSize / promise.totalSize) * 100);
+      const bar = _progressBar(pct);
+      const downloaded = (promise.lastKnownSize / 1024).toFixed(0);
+      const total = (promise.totalSize / 1024).toFixed(0);
+      line += ` ${theme.fg("accent", bar)} ${theme.fg("text", `${pct}%`)} ${theme.fg("muted", `(${downloaded}KB/${total}KB)`)}`;
+    } else {
+      const info = (promise.command || promise.url || "").slice(0, 50);
+      if (info) line += ` ${theme.fg("muted", info)}`;
+    }
   } else if (promise.status === "completed" && promise.result) {
     const r = JSON.stringify(promise.result);
     line += ` ${theme.fg("success", r.length > 40 ? r.slice(0, 37) + "..." : r)}`;
@@ -530,6 +561,27 @@ async function waitForDownload(
 }
 
 // =============================================================================
+// Content-Length Helper
+// =============================================================================
+
+async function getContentLength(url: string): Promise<number | undefined> {
+  try {
+    const proc = spawn("curl", ["-sI", "-L", url]);
+    let output = "";
+    proc.stdout?.on("data", (data: Buffer) => { output += data.toString(); });
+    return await new Promise<number | undefined>((resolve) => {
+      proc.on("close", () => {
+        const match = output.match(/content-length:\s*(\d+)/i);
+        resolve(match ? parseInt(match[1], 10) : undefined);
+      });
+      proc.on("error", () => resolve(undefined));
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+// =============================================================================
 // Download Runner
 // =============================================================================
 
@@ -544,6 +596,14 @@ async function runDownload(promise: BackgroundPromise): Promise<void> {
   }
 
   try {
+    // Fetch Content-Length (best-effort, before download starts)
+    if (!promise.totalSize) {
+      const contentLength = await getContentLength(promise.url);
+      if (contentLength !== undefined) {
+        promise.totalSize = contentLength;
+      }
+    }
+
     promise.status = "running";
     setPromise(promise);
 
@@ -554,8 +614,31 @@ async function runDownload(promise: BackgroundPromise): Promise<void> {
     promise.childPid = proc.pid;
     setPromise(promise);
 
+    // Poll file size every 2s for live progress in status bar
+    const pollInterval = setInterval(async () => {
+      const p = getPromise(promise.id);
+      if (!p || p.status !== "running") {
+        clearInterval(pollInterval);
+        _progressTimers.delete(promise.id);
+        return;
+      }
+      p.lastKnownSize = await getFileSize(p.targetPath!);
+      setPromise(p);
+      _updateStatusBar();
+    }, 2000);
+    _progressTimers.set(promise.id, pollInterval);
+
     await new Promise<void>((resolve) => {
+      const cleanup = () => {
+        const timer = _progressTimers.get(promise.id);
+        if (timer) {
+          clearInterval(timer);
+          _progressTimers.delete(promise.id);
+        }
+      };
+
       proc.on("close", (code: number | null) => {
+        cleanup();
         if (code === 0) {
           promise.status = "completed";
           promise.result = { path: promise.targetPath };
@@ -568,6 +651,7 @@ async function runDownload(promise: BackgroundPromise): Promise<void> {
         resolve();
       });
       proc.on("error", (err: Error) => {
+        cleanup();
         promise.status = "failed";
         promise.error = err.message;
         promise.completedAt = Date.now();
@@ -576,6 +660,11 @@ async function runDownload(promise: BackgroundPromise): Promise<void> {
       });
     });
   } catch (err) {
+    const timer = _progressTimers.get(promise.id);
+    if (timer) {
+      clearInterval(timer);
+      _progressTimers.delete(promise.id);
+    }
     promise.status = "failed";
     promise.error = err instanceof Error ? err.message : String(err);
     promise.completedAt = Date.now();
@@ -720,6 +809,41 @@ async function runChainedPromise(promise: BackgroundPromise): Promise<void> {
 }
 
 // =============================================================================
+// Shutdown Cleanup — cancel all promises when pi exits
+// =============================================================================
+
+/**
+ * Cancel all running/pending promises — kills child processes, clears timers,
+ * marks every promise as failed with reason "pi shutdown".
+ */
+function cancelAllPromises(): void {
+  for (const [, promise] of promises) {
+    if (promise.status === "running" || promise.status === "pending") {
+      // Kill child process
+      if (promise.childPid) {
+        try {
+          process.kill(promise.childPid, "SIGTERM");
+        } catch {
+          // May have already exited
+        }
+      }
+      // Clear progress polling
+      const timer = _progressTimers.get(promise.id);
+      if (timer) {
+        clearInterval(timer);
+        _progressTimers.delete(promise.id);
+      }
+      // Mark as cancelled
+      promise.status = "cancelled";
+      promise.error = "pi exited — session ended";
+      promise.completedAt = Date.now();
+      promise.notified = true; // suppress notification (no agent session)
+      setPromise(promise);
+    }
+  }
+}
+
+// =============================================================================
 // Tools Definition
 // =============================================================================
 
@@ -819,6 +943,10 @@ function registerTools(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     sessionCtx = { ui: ctx.ui, theme: ctx.ui.theme };
     _updateStatusBar(sessionCtx);
+  });
+
+  pi.on("session_shutdown", async () => {
+    cancelAllPromises();
   });
 
   pi.registerShortcut("ctrl+shift+b", {
@@ -1050,7 +1178,15 @@ function registerTools(pi: ExtensionAPI): void {
           };
         }
         
-        const text = `${promise.name} (${promise.type}): ${promise.status}${promise.lastKnownSize ? ` - ${promise.lastKnownSize} bytes` : ""}`;
+        let text = `${promise.name} (${promise.type}): ${promise.status}`;
+        if (promise.lastKnownSize) {
+          if (promise.totalSize && promise.totalSize > 0) {
+            const pct = Math.round((promise.lastKnownSize / promise.totalSize) * 100);
+            text += ` - ${pct}% (${promise.lastKnownSize} bytes / ${promise.totalSize} bytes)`;
+          } else {
+            text += ` - ${promise.lastKnownSize} bytes`;
+          }
+        }
         
         return {
           content: [{ type: "text", text }],
@@ -1417,6 +1553,12 @@ function registerTools(pi: ExtensionAPI): void {
           } catch {
             // Process may have already exited
           }
+        }
+        // Clean up progress polling timer
+        const timer = _progressTimers.get(promise.id);
+        if (timer) {
+          clearInterval(timer);
+          _progressTimers.delete(promise.id);
         }
         setPromise(promise);
         

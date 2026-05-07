@@ -278,6 +278,15 @@ A → C (on-failure)  ✗ cannot branch from same node
 
 See the [failure-recovery.md](examples/failure-recovery.md) example for the correct branching pattern.
 
+## Behavior on pi shutdown
+
+When pi exits, the extension listens for `session_shutdown` and:
+- **Cancels** all running/pending promises (status: `cancelled`, reason: `"pi exited — session ended"`)
+- **Kills** all child processes with `SIGTERM`
+- **Clears** all progress polling timers
+
+No orphaned processes remain after pi closes.
+
 ## Related Tools
 
 - `promise-create` — start a background task
