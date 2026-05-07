@@ -216,13 +216,77 @@ Otherwise: **fire a promise.**
 
 ---
 
+## Chain Pitfalls (Common Confusion Sources)
+
+### 1. `promise-then` always appends to the END of the chain
+
+When you call `promise-then(promiseId="X", command="step")`, the step is appended to the **terminal** of X's chain, not directly to X. If X already has children, `step` runs after the *last* child.
+
+```
+promise-create(command="A", name="root")
+  → promise-then(promiseId="root", command="B")     ← chain: A → B
+  → promise-then(promiseId="root", command="C")     ← chain: A → B → C (not A → C!)
+```
+
+Calling `promise-then` on a promise that already has a chain **appends** to the end. Use `promise-graph` or `promises-list` to verify the chain structure after each chaining operation.
+
+### 2. Failure cascades — one break cancels all downstream `on-success` steps
+
+If step A fails, every step in its chain with `condition="on-success"` is cancelled in sequence:
+
+```
+A (fails) → B (on-success → cancelled) → C (on-success → cancelled) → D (on-success → cancelled)
+```
+
+Each cancelled promise in the chain gets an automatic notification explaining why it was skipped — look for the parent ID and status in the cancellation message.
+
+### 3. Re-chaining after failure requires a fresh attachment
+
+When a step was cancelled because its parent failed, the cancelled step **cannot be re-parented**. It stays in the promise history as cancelled. To retry it:
+
+1. Create a **new root promise** for the step you want to retry (the env setup, data prep, etc.)
+2. Use `promise-rechain(fromPromiseId="cancelled-step", toPromiseId="new-completed-step")` — this creates a new promise with the same command and attaches it to the new parent's chain
+3. Or manually chain your build/test steps to the new root with `promise-then`
+
+**Before:**
+```
+  promise-3: create conda env — FAILED
+    └─ promise-4: build — CANCELLED [on-success — parent failed]
+
+  promise-5: create conda env — COMPLETED
+```
+
+**After `promise-rechain(fromPromiseId="promise-4", toPromiseId="promise-5")`:**
+```
+  promise-5: create conda env — COMPLETED
+    └─ promise-6: build — PENDING [on-success] ← new promise
+```
+
+### 4. Check chain structure visually after every chaining operation
+
+`promise-then` now returns the full chain visualization. Always look at the returned tree or path to verify the chain topology is what you intended. You can also call `promise-graph(promiseId=...)` at any time to inspect a specific chain.
+
+### 5. Chains are linear, not trees
+
+Each promise can have **one** child (via `thenPromiseId`). If you need two steps to run after the same parent (e.g., one on-success and one on-failure), they must be on **separate chains** — you cannot branch from a single point.
+
+```
+A → B (on-success)  ✓ linear chain
+A → C (on-failure)  ✗ cannot branch from same node
+                    → must use separate chains
+```
+
+See the [failure-recovery.md](examples/failure-recovery.md) example for the correct branching pattern.
+
 ## Related Tools
 
 - `promise-create` — start a background task
 - `promise-then` — chain a task after an existing promise
+- `promise-rechain` — re-attach a cancelled/failed promise to a different parent
+- `promise-graph` — inspect chain relationships (tree view for one or all chains)
 - `promise-await` — block until done (rarely needed)
 - `promise-status` — non-blocking check
-- `promises-list` — list all promises
+- `promises-list` — list all promises as a chain tree
 - `promise-cancel` — cancel a running task
 - `F4` — toggle expanded promise status bar
 

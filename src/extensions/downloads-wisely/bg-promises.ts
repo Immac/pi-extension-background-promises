@@ -120,6 +120,97 @@ function collectRootPromises(): BackgroundPromise[] {
 }
 
 // =============================================================================
+// Chain Visualization Helpers
+// =============================================================================
+
+/**
+ * Build a tree rendering for a single chain starting at root.
+ * Shows indentation with arrows, status glyphs, conditions, and error reasons.
+ * If terminalId is provided, marks that promise as "just added".
+ */
+function buildChainText(root: BackgroundPromise, terminalId?: string): string[] {
+  const lines: string[] = [];
+  let current: BackgroundPromise | undefined = root;
+  let depth = 0;
+
+  while (current) {
+    const indentStr = "  ".repeat(depth);
+    const arrow = depth === 0 ? "" : "└─ ";
+    const glyph = _STATUS_GLYPH[current.status] || "?";
+
+    let line = `${indentStr}${arrow}${glyph} ${current.id}: ${current.name} (${current.type})`;
+    line += ` - ${current.status.toUpperCase()}`;
+
+    // Show condition for chained promises
+    if (depth > 0 && current.thenCondition) {
+      line += ` [${current.thenCondition}]`;
+    }
+
+    // Show cancellation reason
+    if (current.status === "cancelled" && current.error) {
+      const reason = current.error.length > 70 ? current.error.slice(0, 67) + "..." : current.error;
+      line += ` — ${reason}`;
+    }
+
+    // Mark terminal if requested
+    if (terminalId && current.id === terminalId) {
+      line += " ← just added";
+    }
+
+    lines.push(line);
+
+    // Walk to next in linked list
+    if (current.thenPromiseId) {
+      current = promises.get(current.thenPromiseId) ?? undefined;
+    } else {
+      current = undefined;
+    }
+    depth++;
+  }
+
+  return lines;
+}
+
+/**
+ * Build a compact one-line chain path for a single root promise.
+ * Example: "step1 (✓ completed) → step2 (● running) → step3 (○ pending)"
+ */
+function buildChainPathText(root: BackgroundPromise): string {
+  const parts: string[] = [];
+  let current: BackgroundPromise | undefined = root;
+
+  while (current) {
+    const glyph = _STATUS_GLYPH[current.status] || "?";
+    const display = `${current.name} (${glyph} ${current.status})`;
+    parts.push(display);
+    current = current.thenPromiseId ? (promises.get(current.thenPromiseId) ?? undefined) : undefined;
+  }
+
+  return parts.join(" → ");
+}
+
+/**
+ * Build the full forest rendering: all root chains with tree indentation.
+ */
+function buildAllChainsText(): string[] {
+  const roots = collectRootPromises();
+  if (roots.length === 0) return ["No active promises"];
+
+  // Prioritise running/pending first
+  const priority = roots.filter(r => r.status === "running" || r.status === "pending");
+  const rest = roots.filter(r => r.status !== "running" && r.status !== "pending");
+  const sorted = [...priority, ...rest];
+
+  const lines: string[] = ["Root chains:"];
+  for (const root of sorted) {
+    lines.push("");
+    lines.push(...buildChainText(root));
+  }
+
+  return lines;
+}
+
+// =============================================================================
 // Completion Notification (set by registerTools to deliver results to agent)
 // =============================================================================
 
@@ -686,6 +777,33 @@ function registerTools(pi: ExtensionAPI): void {
           },
           { triggerTurn: true, deliverAs: "followUp" }
         );
+      } else if (promise.status === "cancelled") {
+        const lines = [
+          `\u23F1 Promise "${promise.name}" skipped!`,
+          `\u2022 Type: ${promise.type}`,
+          `\u2022 Reason: ${promise.error ?? "Cancelled"}`,
+        ];
+        // Show the parent chain for context
+        for (const [, p] of promises) {
+          if (p.thenPromiseId === promise.id) {
+            const parentId = p.id;
+            const parent = promises.get(parentId);
+            if (parent) {
+              lines.push(`\u2022 Parent "${parent.name}" (${parent.id}) status: ${parent.status}`);
+            }
+            break;
+          }
+        }
+        lines.push(`You can use promise-rechain to retry this step on a different parent.`);
+
+        pi.sendMessage(
+          {
+            customType: "promise-completion",
+            content: lines.join("\n"),
+            display: true,
+          },
+          { triggerTurn: true, deliverAs: "followUp" }
+        );
       }
 
       // Also update status bar
@@ -955,13 +1073,13 @@ function registerTools(pi: ExtensionAPI): void {
   );
 
   // ---------------------------------------------------------------------
-  // promises-list: List all tracked promises
+  // promises-list: List all tracked promises (tree view)
   // ---------------------------------------------------------------------
   pi.registerTool(
     defineTool({
       name: "promises-list",
       label: "Promises List",
-      description: "List all tracked background promises.",
+      description: "List all tracked background promises as a tree showing parent-child chain relationships.",
       parameters: Type.Object({}),
       async execute() {
         const all: BackgroundPromise[] = [];
@@ -976,21 +1094,282 @@ function registerTools(pi: ExtensionAPI): void {
           };
         }
 
-        const lines = all.map((p) => `${p.id}: ${p.name} (${p.type}) - ${p.status}`);
+        const treeLines = buildAllChainsText();
+        const orphaned = all.filter(p => {
+          // Not a root and not referenced by any parent — orphan
+          if (collectRootPromises().includes(p)) return false;
+          for (const [, q] of promises) {
+            if (q.thenPromiseId === p.id) return false;
+          }
+          return true;
+        });
+        if (orphaned.length > 0) {
+          treeLines.push("");
+          treeLines.push(`Orphaned (${orphaned.length}):`);
+          for (const o of orphaned) {
+            treeLines.push(`  ${_STATUS_GLYPH[o.status] || "?"} ${o.id}: ${o.name} - ${o.status}`);
+          }
+        }
 
         return {
-          content: [{ type: "text", text: lines.join("\n") }],
+          content: [{ type: "text", text: treeLines.join("\n") }],
           details: {
             count: all.length,
+            tree: buildAllChainsText(),
             promises: all.map((p) => ({
               promiseId: p.id,
               name: p.name,
               type: p.type,
               status: p.status,
               hasResult: !!p.result,
+              parentId: (() => {
+                for (const [, q] of promises) {
+                  if (q.thenPromiseId === p.id) return q.id;
+                }
+                return undefined;
+              })(),
+              childId: p.thenPromiseId,
+              condition: p.thenCondition,
               createdAt: p.createdAt,
             }))
-          },
+          } as any,
+        };
+      },
+    })
+  );
+
+  // ---------------------------------------------------------------------
+  // promise-graph: Visualise chain relationships
+  // ---------------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "promise-graph",
+      label: "Promise Graph",
+      description: "Show the chain tree for a specific promise or all chains. Returns a structured view of parent-child relationships.",
+      parameters: Type.Object({
+        promiseId: Type.Optional(Type.String({ description: "Show chain for a specific promise ID (shows its full chain). If omitted, shows all root chains." })),
+      }),
+      async execute(_toolCallId: string, args: { promiseId?: string }) {
+        if (args.promiseId) {
+          const target = getPromise(args.promiseId);
+          if (!target) {
+            return {
+              content: [{ type: "text", text: `Promise not found: ${args.promiseId}` }],
+              details: { found: false },
+              isError: true
+            };
+          }
+
+          // Find the root of this promise's chain
+          let root = target;
+          let found: BackgroundPromise | undefined;
+          do {
+            found = undefined;
+            for (const [, p] of promises) {
+              if (p.thenPromiseId === root.id) {
+                root = p;
+                found = p;
+                break;
+              }
+            }
+          } while (found);
+
+          const chainLines = buildChainText(root);
+          const chainPath = buildChainPathText(root);
+          // Find depth of target in chain
+          let depth = 0;
+          let cur: BackgroundPromise | undefined = root;
+          while (cur && cur.id !== target.id) {
+            cur = cur.thenPromiseId ? (promises.get(cur.thenPromiseId) ?? undefined) : undefined;
+            depth++;
+          }
+
+          return {
+            content: [{ type: "text", text: [
+              `Chain for ${target.id} (${target.name}):`,
+              "",
+              ...chainLines,
+              "",
+              `Path: ${chainPath}`,
+              `Depth: ${depth} | Status: ${target.status}`,
+            ].join("\n") }],
+            details: {
+              found: true,
+              targetId: target.id,
+              targetName: target.name,
+              targetStatus: target.status,
+              depth,
+              chainPath,
+              chain: (() => {
+                const nodes: Array<{ id: string; name: string; status: string; condition?: string }> = [];
+                let c: BackgroundPromise | undefined = root;
+                while (c) {
+                  nodes.push({
+                    id: c.id,
+                    name: c.name,
+                    status: c.status,
+                    condition: c.thenCondition,
+                  });
+                  c = c.thenPromiseId ? (promises.get(c.thenPromiseId) ?? undefined) : undefined;
+                }
+                return nodes;
+              })(),
+            } as any,
+          };
+        }
+
+        // Show all chains
+        const treeLines = buildAllChainsText();
+        const roots = collectRootPromises();
+        const chainPaths = roots.map((r, i) => `${i + 1}. ${buildChainPathText(r)}`);
+
+        return {
+          content: [{ type: "text", text: [
+            "Promise chain forest:",
+            "",
+            ...treeLines,
+            "",
+            "Compact paths:",
+            ...chainPaths,
+          ].join("\n") }],
+          details: {
+            count: roots.length,
+            forest: roots.map(r => ({
+              rootId: r.id,
+              rootName: r.name,
+              path: buildChainPathText(r),
+              nodes: (() => {
+                const nodes: Array<{ id: string; name: string; status: string; condition?: string }> = [];
+                let c: BackgroundPromise | undefined = r;
+                while (c) {
+                  nodes.push({
+                    id: c.id,
+                    name: c.name,
+                    status: c.status,
+                    condition: c.thenCondition,
+                  });
+                  c = c.thenPromiseId ? (promises.get(c.thenPromiseId) ?? undefined) : undefined;
+                }
+                return nodes;
+              })(),
+            })),
+          } as any,
+        };
+      },
+    })
+  );
+
+  // ---------------------------------------------------------------------
+  // promise-rechain: Re-attach a cancelled/failed promise to a new parent
+  // ---------------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "promise-rechain",
+      label: "Promise Rechain",
+      description: "Re-attach a cancelled or failed promise so it runs after a different parent. Creates a new promise with the same command and attaches it to the target's chain. The original cancelled/failed promise remains in history.",
+      parameters: Type.Object({
+        fromPromiseId: Type.String({ description: "ID of the cancelled/failed promise whose command should be retried" }),
+        toPromiseId: Type.String({ description: "ID of the promise to chain after (the new parent)" }),
+        condition: Type.Optional(Type.String({ description: "Condition for the re-chained step: 'always' (default), 'on-success', or 'on-failure'" })),
+        name: Type.Optional(Type.String({ description: "Optional name for the retried promise. Defaults to original name." })),
+      }),
+      async execute(_toolCallId: string, args: {
+        fromPromiseId: string;
+        toPromiseId: string;
+        condition?: string;
+        name?: string;
+      }) {
+        // ---- Validate source ----
+        const fromPromise = getPromise(args.fromPromiseId);
+        if (!fromPromise) {
+          return { content: [{ type: "text", text: `fromPromise not found: ${args.fromPromiseId}` }], details: { success: false, error: "fromPromise not found" } as any, isError: true };
+        }
+        if (fromPromise.status === "running" || fromPromise.status === "pending") {
+          return { content: [{ type: "text", text: `Cannot re-chain a ${fromPromise.status} promise. Cancel it first.` }], details: { success: false, error: "Source promise is still running" } as any, isError: true };
+        }
+        if (!fromPromise.command && !fromPromise.url) {
+          return { content: [{ type: "text", text: "Source promise has no command or download to retry." }], details: { success: false, error: "No command/download to retry" } as any, isError: true };
+        }
+
+        // ---- Validate target ----
+        const toPromise = getPromise(args.toPromiseId);
+        if (!toPromise) {
+          return { content: [{ type: "text", text: `toPromise not found: ${args.toPromiseId}` }], details: { success: false, error: "toPromise not found" } as any, isError: true };
+        }
+
+        // ---- Validate condition ----
+        const validConditions = ["always", "on-success", "on-failure"];
+        const condition = (args.condition ?? "always") as "always" | "on-success" | "on-failure";
+        if (!validConditions.includes(condition)) {
+          return { content: [{ type: "text", text: `Invalid condition: ${args.condition}. Use: always, on-success, on-failure` }], details: { success: false, error: "Invalid condition" } as any, isError: true };
+        }
+
+        // ---- Detach fromPromise from its old parent (if any) ----
+        for (const [, p] of promises) {
+          if (p.thenPromiseId === fromPromise.id) {
+            p.thenPromiseId = undefined;
+            setPromise(p);
+            break;
+          }
+        }
+
+        // ---- Find terminal of target chain ----
+        const terminal = findTerminalPromise(toPromise);
+
+        // ---- Attach a new promise with same command to terminal ----
+        const isDownload = !!fromPromise.url;
+        terminal.thenCommand = isDownload ? undefined : fromPromise.command;
+        terminal.thenDownload = isDownload ? fromPromise.url : undefined;
+        terminal.thenPath = fromPromise.targetPath;
+        terminal.thenName = args.name ?? fromPromise.name;
+        terminal.thenCondition = condition;
+        setPromise(terminal);
+
+        // ---- If terminal is settled, run chained promise immediately ----
+        const isSettled = terminal.status === "completed" || terminal.status === "failed";
+        if (isSettled) {
+          runChainedPromise(terminal);
+        }
+
+        _updateStatusBar();
+
+        // ---- Build response with chain context ----
+        // Find root of target's chain
+        let root = toPromise;
+        let found: BackgroundPromise | undefined;
+        do {
+          found = undefined;
+          for (const [, p] of promises) {
+            if (p.thenPromiseId === root.id) {
+              root = p;
+              found = p;
+              break;
+            }
+          }
+        } while (found);
+
+        const chainLines = buildChainText(root, terminal.id);
+        const chainPath = buildChainPathText(root);
+
+        return {
+          content: [{ type: "text", text: [
+            `Re-chained "${fromPromise.name}" after ${terminal.id} (condition: ${condition})`,
+            "",
+            ...chainLines,
+            "",
+            `Path: ${chainPath}`,
+          ].join("\n") }],
+          details: {
+            success: true,
+            error: "",
+            fromPromiseId: fromPromise.id,
+            fromPromiseName: fromPromise.name,
+            toPromiseId: toPromise.id,
+            toPromiseName: toPromise.name,
+            terminalId: terminal.id,
+            condition,
+            chainPath,
+          } as any,
         };
       },
     })
@@ -1131,8 +1510,33 @@ function registerTools(pi: ExtensionAPI): void {
         _updateStatusBar();
 
         const actionType = args.download ? "download" : "command";
+
+        // ---- Build chain context for response ----
+        // Find root of target's chain for visualization
+        let root = promise;
+        let foundAncestor: BackgroundPromise | undefined;
+        do {
+          foundAncestor = undefined;
+          for (const [, p] of promises) {
+            if (p.thenPromiseId === root.id) {
+              root = p;
+              foundAncestor = p;
+              break;
+            }
+          }
+        } while (foundAncestor);
+
+        const chainPath = buildChainPathText(root);
+        const chainLines = buildChainText(root, terminal.id);
+
         return {
-          content: [{ type: "text", text: `Chained ${actionType} to ${terminal.id} (condition: ${condition})` }],
+          content: [{ type: "text", text: [
+            `Chained ${actionType} "${args.name ?? args.command ?? args.download}" after ${terminal.id} (condition: ${condition})`,
+            "",
+            ...chainLines,
+            "",
+            `Path: ${chainPath}`,
+          ].join("\n") }],
           details: {
             success: true,
             error: "",
@@ -1142,7 +1546,17 @@ function registerTools(pi: ExtensionAPI): void {
             path: args.path,
             name: args.name,
             condition,
-          },
+            chainPath,
+            chainNodes: (() => {
+              const nodes: Array<{ id: string; name: string; status: string }> = [];
+              let c: BackgroundPromise | undefined = root;
+              while (c) {
+                nodes.push({ id: c.id, name: c.name, status: c.status });
+                c = c.thenPromiseId ? (promises.get(c.thenPromiseId) ?? undefined) : undefined;
+              }
+              return nodes;
+            })(),
+          } as any,
         };
       },
     })

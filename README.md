@@ -39,10 +39,12 @@ Agent: "Download complete. Here's my review of train.py..."
 | Tool | Description |
 |------|-------------|
 | `promise-create` | Start a background task (command or download). Returns immediately. Result auto-delivers. Accepts `then` + `thenCondition` for initial chaining. |
-| `promise-then` | Chain a command or download **after** any existing promise. Multiple calls create a sequence. Supports `condition`: `always` (default), `on-success`, `on-failure`. |
+| `promise-then` | Chain a command or download **after** any existing promise. Multiple calls create a sequence. Supports `condition`: `always` (default), `on-success`, `on-failure`. Returns full chain visualization. |
+| `promise-graph` | Inspect chain relationships — tree view for a specific promise or all chains. |
+| `promise-rechain` | Re-attach a cancelled/failed promise's command to a different parent chain. |
 | `promise-await` | Block until a promise completes (rarely needed — results auto-deliver). Has smart download stall detection. |
 | `promise-status` | Check status without blocking. Returns last known result. |
-| `promises-list` | List all tracked promises and their current status. |
+| `promises-list` | List all tracked promises as a chain tree showing parent-child relationships. |
 | `promise-cancel` | Cancel a pending or running promise (kills child process). |
 
 ---
@@ -97,6 +99,16 @@ Each call appends to the **end** of the chain. The result flows through: `prepro
 
 **Why this matters:** You don't need to plan the full pipeline upfront. Start step 1, work on other things, and chain step 2 when you figure out what it should be. The chain auto-executes as each link completes.
 
+After each `promise-then` call, the updated chain is returned as a tree:
+
+```
+✓ promise-abc: preprocess (COMPLETED)
+  └─ ✓ promise-def: train (COMPLETED)
+       └─ ○ promise-ghi: eval (PENDING) ← just added
+
+Path: preprocess (✓ completed) → train (✓ completed) → eval (○ pending)
+```
+
 ### 🎯 Conditional Chains
 
 Control **when** a chained task runs:
@@ -126,6 +138,49 @@ promise-then(
 ```
 
 If a condition isn't met, a "skipped" promise is created (status `cancelled`) with a message explaining why.
+
+### 🔄 Re-Chaining After Failure (`promise-rechain`)
+
+When a promise is cancelled because its parent failed (e.g., a build step skipped because env creation failed), use `promise-rechain` to retry it on a different parent:
+
+```
+# Scenario: env creation failed, build was auto-cancelled
+promise-3: create conda env — FAILED
+  └─ promise-4: build — CANCELLED [on-success — parent failed]
+
+# Create a new env
+promise-create(command="conda create...", name="new-env")
+
+# Re-chain the build step after the new env
+promise-rechain(fromPromiseId="promise-4", toPromiseId="new-env", condition="on-success")
+
+# Result:
+new-env — COMPLETED
+  └─ promise-6: build — PENDING [on-success] ← new promise spawned from promise-4's command
+```
+
+This avoids manually re-creating the build command — `promise-rechain` copies the original command and attaches it to the new parent's chain.
+
+### 🔍 Chain Inspection (`promise-graph`)
+
+Inspect chain relationships without a full list:
+
+```
+promise-graph(promiseId="promise-abc")
+
+  → Chain for promise-abc (build):
+    ✓ promise-xyz: env setup (COMPLETED)
+      └─ ✓ promise-abc: build (COMPLETED) [on-success]
+    Path: env setup (✓ completed) → build (✓ completed)
+    Depth: 1 | Status: completed
+```
+
+Omit the `promiseId` to see all chains (forest view):
+
+```
+promise-graph()
+  → Shows all root chains with tree visualization + compact paths
+```
 
 ### 🧵 Multi-Step Pipeline Pattern
 
