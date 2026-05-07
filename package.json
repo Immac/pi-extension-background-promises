@@ -1,0 +1,40 @@
+{
+  "name": "bg-promises",
+  "version": "1.0.0",
+  "description": "Non-blocking background promises for pi agent — fire tasks, keep working, results auto-deliver",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/Immac/pi-extension-background-promises",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Immac/pi-extension-background-promises.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Immac/pi-extension-background-promises/issues"
+  },
+  "scripts": {
+    "validate": "tsc --noEmit --skipLibCheck",
+    "test": "npx tsx test/auto-injection.test.ts"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "^0.73.0",
+    "@mariozechner/pi-coding-agent": "^0.73.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extensions/downloads-wisely/bg-promises.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "dependencies": {
+    "@types/node": "^25.6.0"
+  }
+}
