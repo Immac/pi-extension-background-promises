@@ -12,12 +12,12 @@ description: Run background tasks without blocking — fire promises, keep worki
 
 | Situation | Default action |
 |-----------|---------------|
-| Task takes >2 seconds and you have other work | ✅ `promise-create(...)` → **keep working** |
+| Task takes >2 seconds and you have other work | ✅ `promise-create(subject=..., ...)` → **keep working on DIFFERENT tasks** |
 | You need to do something after a task finishes | ✅ `promise-then(promiseId=..., command=...)` |
 | You absolutely need the result to continue | ✅ `promise-then(promiseId=..., command=...)` — still don't block |
 | You must block (no other work possible) | ⚠️ `promise-await(promiseId=...)` — last resort |
 
-**Do not wait if you can work.** Every time you use `promise-create`, you give yourself the ability to answer more of the user's questions, review more code, or chain next steps — all while the task runs.
+**Do not wait if you can work — but work on DIFFERENT things.** Every time you use `promise-create`, you give yourself the ability to answer more of the user's questions, review more code, or chain next steps — all while the task runs. Use `subject` to label what the promise handles, and do NOT start working on that same task yourself.
 
 ---
 
@@ -46,11 +46,12 @@ description: Run background tasks without blocking — fire promises, keep worki
 User: "Run the full test suite and review the new feature code"
 
 You:
-1. promise-create(command="npm test", name="test-suite")
+1. promise-create(command="npm test", name="test-suite",
+                  subject="run test suite")
    → promiseId: "promise-456"
 
-2. read(path="./src/new-feature.ts")          ← work while tests run
-3. identify issues in the new feature code     ← work while tests run
+2. read(path="./src/new-feature.ts")          ← DIFFERENT task — safe
+3. identify issues in the new feature code     ← DIFFERENT task — safe
 
 4. 🔔 Promise "test-suite" completed!         ← auto-delivered
    Result: { output: "PASS 42/42 tests" }
@@ -204,6 +205,40 @@ Press F4 to collapse
 ```
 
 ---
+
+## ⚠️ Avoiding Duplicate Work (Common Pitfall)
+
+**The #1 mistake:** Firing a promise for task X, then starting to work on task X yourself while the promise runs. The promise notification then arrives with stale results.
+
+```
+❌ BAD:
+  promise-create(command="check if marked is installed", subject="check marked")
+  → reads output... "marked not installed!"
+  → installs marked and builds site manually
+  → 🔔 Promise completes: "marked not installed" — stale, already handled
+
+✅ GOOD:
+  promise-create(command="check if marked is installed", subject="check marked")
+  → Trust the promise. Work on something DIFFERENT while it runs.
+  → 🔔 Promise completes: "marked not installed"
+  → Now install marked based on the fresh result.
+```
+
+### How to avoid it
+
+1. **Use `subject`:** Always add `subject="what this is checking"` when creating a promise. This labels the promise's scope so you can check for overlaps via `promises-list`.
+2. **Check before acting:** If you're about to work on something, call `promises-list()` first and check if any active promise's `subject` covers the same task.
+3. **Trust the delegation:** Once you fire a promise, **do not** start working on the same task. The promise handles it. Work on something else.
+4. **Stale notifications:** If a promise notification arrives for something you already handled, the result is stale. Acknowledge and move on — no need to redo work.
+
+### Decision table
+
+| Situation | Action |
+|-----------|--------|
+| Promise `subject` covers task X | Do NOT work on X. Work on Y instead. |
+| No promise covers task X | Safe to work on X directly |
+| Promise notification for already-done work | Result is stale — skip it |
+| Unsure what promises exist | Call `promises-list()` — check `subject` fields |
 
 ## When NOT to use promises
 

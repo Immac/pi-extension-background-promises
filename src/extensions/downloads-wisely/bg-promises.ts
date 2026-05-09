@@ -40,6 +40,8 @@ import { defineTool, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 interface BackgroundPromise {
   id: string;
   name: string;
+  /** Semantic description of what this promise is doing — used to detect redundant work */
+  subject?: string;
   type: "download" | "command";
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
   targetPath?: string;
@@ -51,6 +53,8 @@ interface BackgroundPromise {
   thenPath?: string;
   thenName?: string;
   thenCondition?: "always" | "on-success" | "on-failure";
+  /** Subject propagated to the chained promise */
+  thenSubject?: string;
   /** ID of the chained promise (linked-list chain) */
   thenPromiseId?: string;
   lastKnownSize: number;
@@ -639,12 +643,14 @@ async function runDownload(promise: BackgroundPromise): Promise<void> {
 
       proc.on("close", (code: number | null) => {
         cleanup();
-        if (code === 0) {
-          promise.status = "completed";
-          promise.result = { path: promise.targetPath };
-        } else {
-          promise.status = "failed";
-          promise.error = `curl exited with code ${code}`;
+        if (promise.status !== "cancelled") {
+          if (code === 0) {
+            promise.status = "completed";
+            promise.result = { path: promise.targetPath };
+          } else {
+            promise.status = "failed";
+            promise.error = `curl exited with code ${code}`;
+          }
         }
         promise.completedAt = Date.now();
         setPromise(promise);
@@ -652,8 +658,10 @@ async function runDownload(promise: BackgroundPromise): Promise<void> {
       });
       proc.on("error", (err: Error) => {
         cleanup();
-        promise.status = "failed";
-        promise.error = err.message;
+        if (promise.status !== "cancelled") {
+          promise.status = "failed";
+          promise.error = err.message;
+        }
         promise.completedAt = Date.now();
         setPromise(promise);
         resolve();
@@ -708,13 +716,16 @@ async function runCommand(promise: BackgroundPromise): Promise<void> {
 
     await new Promise<void>((resolve) => {
       proc.on("close", (code: number | null) => {
-        if (code === 0) {
-          promise.status = "completed";
-          promise.result = { output: output.trim() };
-        } else {
-          promise.status = "failed";
-          promise.error = `Command exited with code ${code}`;
-          promise.result = { output: output.trim() };
+        // Don't overwrite if already cancelled (e.g., by promise-cancel)
+        if (promise.status !== "cancelled") {
+          if (code === 0) {
+            promise.status = "completed";
+            promise.result = { output: output.trim() };
+          } else {
+            promise.status = "failed";
+            promise.error = `Command exited with code ${code}`;
+            promise.result = { output: output.trim() };
+          }
         }
         promise.completedAt = Date.now();
         setPromise(promise);
@@ -722,8 +733,10 @@ async function runCommand(promise: BackgroundPromise): Promise<void> {
       });
       
       proc.on("error", (err: Error) => {
-        promise.status = "failed";
-        promise.error = err.message;
+        if (promise.status !== "cancelled") {
+          promise.status = "failed";
+          promise.error = err.message;
+        }
         promise.completedAt = Date.now();
         setPromise(promise);
         resolve();
@@ -744,14 +757,27 @@ async function runCommand(promise: BackgroundPromise): Promise<void> {
 // =============================================================================
 
 async function runChainedPromise(promise: BackgroundPromise): Promise<void> {
-  // Notify agent about completion before running chained task
+  // Notify agent — structurally safe because pre-created children already
+  // exist in the linked list, so promise-then always calls findTerminalPromise
+  // on the right node and writes to the terminal's thenCommand, not this one.
   notifyCompletion(promise);
 
   const hasThen = !!(promise.thenCommand || promise.thenDownload);
   if (!hasThen) return;
 
-  // Wait a tick for the original promise to be fully settled
-  await new Promise(r => setTimeout(r, 100));
+  // ---- Cancelled parent: cascade to pre-created child ----
+  if (promise.status === "cancelled") {
+    const child = promise.thenPromiseId ? getPromise(promise.thenPromiseId) : undefined;
+    if (child && (child.status === "pending" || child.status === "running")) {
+      child.status = "cancelled";
+      child.error = `Parent ${promise.id} was cancelled — chain aborted`;
+      child.completedAt = Date.now();
+      setPromise(child);
+      notifyCompletion(child);
+    }
+    _updateStatusBar();
+    return;
+  }
 
   // ---- Condition check ----
   if (promise.thenCondition && promise.thenCondition !== "always") {
@@ -761,47 +787,73 @@ async function runChainedPromise(promise: BackgroundPromise): Promise<void> {
       (promise.thenCondition === "on-failure" && parentSuccess);
 
     if (shouldSkip) {
-      const skipped: BackgroundPromise = {
-        id: generatePromiseId(),
-        name: promise.thenName ?? `skipped-${promise.name}`,
-        type: promise.thenDownload ? "download" : "command",
-        status: "cancelled",
-        command: promise.thenCommand,
-        url: promise.thenDownload,
-        targetPath: promise.thenPath,
-        error: `Skipped: parent ${promise.id} status ${promise.status} did not meet condition ${promise.thenCondition}`,
-        lastKnownSize: 0,
-        createdAt: Date.now(),
-      };
-      setPromise(skipped);
-      notifyCompletion(skipped);
+      const child = promise.thenPromiseId ? getPromise(promise.thenPromiseId) : undefined;
+      if (child) {
+        child.status = "cancelled";
+        child.error = `Skipped: parent ${promise.id} status ${promise.status} did not meet condition ${promise.thenCondition}`;
+        child.completedAt = Date.now();
+        setPromise(child);
+        notifyCompletion(child);
+      } else {
+        // No pre-created child — create a cancelled placeholder for audit trail
+        const skipped: BackgroundPromise = {
+          id: generatePromiseId(),
+          name: promise.thenName ?? `skipped-${promise.name}`,
+          type: promise.thenDownload ? "download" : "command",
+          status: "cancelled",
+          command: promise.thenCommand,
+          url: promise.thenDownload,
+          targetPath: promise.thenPath,
+          error: `Skipped: parent ${promise.id} status ${promise.status} did not meet condition ${promise.thenCondition}`,
+          lastKnownSize: 0,
+          createdAt: Date.now(),
+        };
+        setPromise(skipped);
+        notifyCompletion(skipped);
+      }
       _updateStatusBar();
       return;
     }
   }
 
-  // ---- Create chained promise ----
-  const isDownload = !!promise.thenDownload;
-  const chained: BackgroundPromise = {
-    id: generatePromiseId(),
-    name: promise.thenName ?? `chained from ${promise.name}`,
-    type: isDownload ? "download" : "command",
-    status: "pending",
-    command: promise.thenCommand,
-    url: promise.thenDownload,
-    targetPath: promise.thenPath,
-    previousResult: promise.result,
-    lastKnownSize: 0,
-    createdAt: Date.now(),
-  };
+  // ---- Use pre-created child or create from thenCommand/thenDownload ----
+  let chained = promise.thenPromiseId ? getPromise(promise.thenPromiseId) : undefined;
 
-  // Link parent → child
-  promise.thenPromiseId = chained.id;
-  setPromise(promise);
+  if (!chained) {
+    // No pre-created child (e.g. promise-then after the fact without then at create)
+    const isDownload = !!promise.thenDownload;
+    chained = {
+      id: generatePromiseId(),
+      name: promise.thenName ?? `chained from ${promise.name}`,
+      subject: promise.thenSubject,
+      type: isDownload ? "download" : "command",
+      status: "pending",
+      command: promise.thenCommand,
+      url: promise.thenDownload,
+      targetPath: promise.thenPath,
+      previousResult: promise.result,
+      lastKnownSize: 0,
+      createdAt: Date.now(),
+    };
+    promise.thenPromiseId = chained.id;
+    setPromise(promise);
+  } else {
+    // Pre-created child found — set previousResult now
+    chained.previousResult = promise.result;
+  }
+
+  // If child was already cancelled (e.g. by cancel-cascade or direct cancel),
+  // don't start it — just update state and return.
+  if (chained.status === "cancelled") {
+    setPromise(chained);
+    _updateStatusBar();
+    return;
+  }
+
   setPromise(chained);
   _updateStatusBar();
 
-  if (isDownload) {
+  if (chained.type === "download") {
     runDownload(chained);
   } else {
     runCommand(chained);
@@ -814,7 +866,8 @@ async function runChainedPromise(promise: BackgroundPromise): Promise<void> {
 
 /**
  * Cancel all running/pending promises — kills child processes, clears timers,
- * marks every promise as failed with reason "pi shutdown".
+ * marks every promise as cancelled with reason "pi shutdown".
+ * Iterates all promises since children are tracked in the same map.
  */
 function cancelAllPromises(): void {
   for (const [, promise] of promises) {
@@ -932,6 +985,24 @@ function registerTools(pi: ExtensionAPI): void {
 
       // Also update status bar
       _updateStatusBar();
+
+      // Emit a lightweight status-update event too (no triggerTurn)
+      // This lets agents that poll for changes see progress without a full notification
+      try {
+        if (promise.status === "running" && promise.subject) {
+          // Use nextTurn with display=false so it doesn't interrupt the agent
+          pi.sendMessage(
+            {
+              customType: "promise-status-update",
+              content: `Promise "${promise.name}" is running: ${promise.subject}`,
+              display: false,
+            },
+            { triggerTurn: false }
+          );
+        }
+      } catch {
+        // Session may no longer be active
+      }
     } catch {
       // Session may no longer be active, ignore silently
     }
@@ -990,6 +1061,7 @@ function registerTools(pi: ExtensionAPI): void {
         "When a promise completes, a 🔔 notification message is automatically delivered. You do NOT need to poll or await.",
         "Use the 'then' parameter to chain a command that runs automatically after the first completes.",
         "Do NOT use promise-await unless you have absolutely no other work to do. Chain follow-ups with promise-then instead.",
+        "CRITICAL — Do NOT duplicate the promise's work: Once you create a promise with a subject, trust it to handle that task. Do NOT start working on the same thing yourself. If you receive a promise completion notification for something you've already handled, the result is stale — just acknowledge and move on.",
       ],
       parameters: Type.Object({
         download: Type.Optional(Type.String({ description: "URL to download" })),
@@ -1027,6 +1099,23 @@ function registerTools(pi: ExtensionAPI): void {
           createdAt: Date.now(),
         };
 
+        // Pre-create child immediately so promise-then always finds the
+        // correct terminal via the thenPromiseId linked list — never races
+        // on mutable thenCommand/thenDownload on an intermediate node.
+        if (args.then) {
+          const child: BackgroundPromise = {
+            id: generatePromiseId(),
+            name: `then-${name}`,
+            type: "command",
+            status: "pending",
+            command: args.then,
+            lastKnownSize: 0,
+            createdAt: Date.now(),
+          };
+          promise.thenPromiseId = child.id;
+          setPromise(child);
+        }
+
         setPromise(promise);
 
         if (isDownload) {
@@ -1041,11 +1130,14 @@ function registerTools(pi: ExtensionAPI): void {
         const chainInfo = args.then
           ? ` (will chain to: ${args.then} [${thenCondition}])`
           : "";
-        const text = `Started ${promise.type}: ${promise.id}${chainInfo}`;
+        const subjectInfo = promise.subject
+          ? ` — ${promise.subject}`
+          : "";
+        const text = `Started ${promise.type}: ${promise.id}${subjectInfo}${chainInfo}`;
 
         return {
           content: [{ type: "text", text }],
-          details: { promiseId: promise.id, name: promise.name, type: promise.type, status: "started", willChain: !!args.then, thenCondition },
+          details: { promiseId: promise.id, name: promise.name, subject: promise.subject, type: promise.type, status: "started", willChain: !!args.then, thenCondition },
         };
       },
     })
@@ -1255,6 +1347,7 @@ function registerTools(pi: ExtensionAPI): void {
             promises: all.map((p) => ({
               promiseId: p.id,
               name: p.name,
+              subject: p.subject,
               type: p.type,
               status: p.status,
               hasResult: !!p.result,
@@ -1408,12 +1501,14 @@ function registerTools(pi: ExtensionAPI): void {
         toPromiseId: Type.String({ description: "ID of the promise to chain after (the new parent)" }),
         condition: Type.Optional(Type.String({ description: "Condition for the re-chained step: 'always' (default), 'on-success', or 'on-failure'" })),
         name: Type.Optional(Type.String({ description: "Optional name for the retried promise. Defaults to original name." })),
+        subject: Type.Optional(Type.String({ description: "Optional subject for the retried promise" })),
       }),
       async execute(_toolCallId: string, args: {
         fromPromiseId: string;
         toPromiseId: string;
         condition?: string;
         name?: string;
+        subject?: string;
       }) {
         // ---- Validate source ----
         const fromPromise = getPromise(args.fromPromiseId);
@@ -1459,6 +1554,12 @@ function registerTools(pi: ExtensionAPI): void {
         terminal.thenPath = fromPromise.targetPath;
         terminal.thenName = args.name ?? fromPromise.name;
         terminal.thenCondition = condition;
+        // Propagate subject to the chained promise if provided
+        if (args.subject) {
+          terminal.thenSubject = args.subject;
+        } else if (fromPromise.subject) {
+          terminal.thenSubject = fromPromise.subject;
+        }
         setPromise(terminal);
 
         // ---- If terminal is settled, run chained promise immediately ----
@@ -1544,8 +1645,6 @@ function registerTools(pi: ExtensionAPI): void {
         promise.status = "cancelled";
         promise.error = "Cancelled by user";
         promise.completedAt = Date.now();
-        // Update status bar after cancellation
-        _updateStatusBar();
         // Kill child process if still running
         if (promise.childPid) {
           try {
@@ -1561,6 +1660,30 @@ function registerTools(pi: ExtensionAPI): void {
           _progressTimers.delete(promise.id);
         }
         setPromise(promise);
+
+        // Cascade cancellation to all children in the chain
+        let current = promise;
+        while (current.thenPromiseId) {
+          const child = getPromise(current.thenPromiseId);
+          if (!child) break;
+          if (child.status === "completed" || child.status === "failed") break;
+          child.status = "cancelled";
+          child.error = `Parent ${current.id} was cancelled`;
+          child.completedAt = Date.now();
+          if (child.childPid) {
+            try { process.kill(child.childPid, "SIGTERM"); } catch {}
+          }
+          const childTimer = _progressTimers.get(child.id);
+          if (childTimer) {
+            clearInterval(childTimer);
+            _progressTimers.delete(child.id);
+          }
+          setPromise(child);
+          current = child;
+        }
+
+        // Update status bar after cancellation
+        _updateStatusBar();
         
         return { 
           content: [{ type: "text", text: `Cancelled: ${promise.id}` }], 
@@ -1593,6 +1716,7 @@ function registerTools(pi: ExtensionAPI): void {
         path: Type.Optional(Type.String({ description: "File path to save download to (required when using download)" })),
         name: Type.Optional(Type.String({ description: "Optional name for this chained promise" })),
         condition: Type.Optional(Type.String({ description: "When to run: 'always' (default), 'on-success', or 'on-failure'" })),
+        subject: Type.Optional(Type.String({ description: "Semantic description of what this chained promise handles" })),
       }),
       async execute(_toolCallId: string, args: {
         promiseId: string;
@@ -1601,6 +1725,7 @@ function registerTools(pi: ExtensionAPI): void {
         path?: string;
         name?: string;
         condition?: string;
+        subject?: string;
       }) {
         // ---- Validate target ----
         const promise = getPromise(args.promiseId);
@@ -1641,6 +1766,10 @@ function registerTools(pi: ExtensionAPI): void {
         terminal.thenPath = args.path;
         terminal.thenName = args.name ?? `then-${terminal.name}`;
         terminal.thenCondition = condition;
+        // Propagate subject to the chained promise
+        if (args.subject) {
+          terminal.thenSubject = args.subject;
+        }
         setPromise(terminal);
 
         // ---- If terminal is already settled, run chained task immediately ----
