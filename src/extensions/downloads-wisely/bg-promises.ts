@@ -52,7 +52,7 @@ interface BackgroundPromise {
   thenDownload?: string;
   thenPath?: string;
   thenName?: string;
-  thenCondition?: "always" | "on-success" | "on-failure";
+  thenCondition?: ThenCondition;
   /** Subject propagated to the chained promise */
   thenSubject?: string;
   /** ID of the chained promise (linked-list chain) */
@@ -75,6 +75,12 @@ interface AwaitOptions {
   stallTimeout?: number;
   doneGracePeriod?: number;
 }
+
+// =============================================================================
+// Types
+// =============================================================================
+
+type ThenCondition = "always" | "on-success" | "on-failure";
 
 // =============================================================================
 // Promise Manager (Singleton)
@@ -1159,7 +1165,7 @@ function registerTools(pi: ExtensionAPI): void {
                   existingResult: existing.result,
                   previousResult: existing.previousResult,
                   willChain: false,
-                  thenCondition: undefined as ("always" | "on-success" | "on-failure" | undefined),
+                  thenCondition: undefined as (ThenCondition | undefined),
                   error: existing.error ?? "",
                 },
               };
@@ -1170,7 +1176,7 @@ function registerTools(pi: ExtensionAPI): void {
         const isDownload = !!args.download;
         const name = args.name ?? (isDownload ? "download" : "command");
 
-        const thenCondition = (args.thenCondition as "always" | "on-success" | "on-failure" | undefined) ?? "always";
+        const thenCondition = (args.thenCondition as ThenCondition | undefined) ?? "always";
 
         const promise: BackgroundPromise = {
           id: generatePromiseId(),
@@ -1236,7 +1242,7 @@ function registerTools(pi: ExtensionAPI): void {
             type: promise.type,
             status: "started",
             willChain: !!args.then,
-            thenCondition: thenCondition as ("always" | "on-success" | "on-failure" | undefined),
+            thenCondition: thenCondition as (ThenCondition | undefined),
             dedup: false,
             replace: args.replace ?? false,
             existingResult: undefined,
@@ -1640,7 +1646,7 @@ function registerTools(pi: ExtensionAPI): void {
 
         // ---- Validate condition ----
         const validConditions = ["always", "on-success", "on-failure"];
-        const condition = (args.condition ?? "always") as "always" | "on-success" | "on-failure";
+        const condition = (args.condition ?? "always") as ThenCondition;
         if (!validConditions.includes(condition)) {
           return { content: [{ type: "text", text: `Invalid condition: ${args.condition}. Use: always, on-success, on-failure` }], details: { success: false, error: "Invalid condition" } as any, isError: true };
         }
@@ -1856,7 +1862,7 @@ function registerTools(pi: ExtensionAPI): void {
         }
 
         const validConditions = ["always", "on-success", "on-failure"];
-        const condition = (args.condition ?? "always") as "always" | "on-success" | "on-failure";
+        const condition = (args.condition ?? "always") as ThenCondition;
         if (!validConditions.includes(condition)) {
           return { content: [{ type: "text", text: `Invalid condition: ${args.condition}. Use: always, on-success, on-failure` }], details: { success: false, error: `Invalid condition: ${args.condition}` } as any, isError: true };
         }
