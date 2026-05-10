@@ -28,7 +28,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { stat } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
 
 import { Type } from "@mariozechner/pi-ai";
 import { defineTool, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -52,7 +52,7 @@ interface BackgroundPromise {
   thenDownload?: string;
   thenPath?: string;
   thenName?: string;
-  thenCondition?: "always" | "on-success" | "on-failure";
+  thenCondition?: ThenCondition;
   /** Subject propagated to the chained promise */
   thenSubject?: string;
   /** ID of the chained promise (linked-list chain) */
@@ -75,6 +75,12 @@ interface AwaitOptions {
   stallTimeout?: number;
   doneGracePeriod?: number;
 }
+
+// =============================================================================
+// Types
+// =============================================================================
+
+type ThenCondition = "always" | "on-success" | "on-failure";
 
 // =============================================================================
 // Promise Manager (Singleton)
@@ -268,6 +274,11 @@ function notifyCompletion(promise: BackgroundPromise): void {
 let _statusBarCtx: { ui: any; theme: any } | undefined;
 let _expanded = false;
 const _progressTimers = new Map<string, ReturnType<typeof setInterval>>();
+/**
+ * AbortControllers for in-flight fetch-based downloads.
+ * Allows promise-cancel to abort an active HTTP stream.
+ */
+const _downloadControllers = new Map<string, AbortController>();
 
 const _STATUS_GLYPH: Record<string, string> = {
   running: "\u25CF",
@@ -503,17 +514,6 @@ function _updateStatusBar(ctx?: { ui: any; theme: any }): void {
 
 // =============================================================================
 // Smart Stall Detection for Downloads
-// =============================================================================
-
-async function getFileSize(path: string): Promise<number> {
-  try {
-    const stats = await stat(path);
-    return stats.size;
-  } catch {
-    return 0;
-  }
-}
-
 async function waitForDownload(
   promise: BackgroundPromise,
   options: AwaitOptions
@@ -527,36 +527,8 @@ async function waitForDownload(
   }
 
   const stallTimeout = (options.stallTimeout ?? 60) * 1000;
-  const doneGracePeriod = (options.doneGracePeriod ?? 5) * 1000;
-
-  let lastSize = await getFileSize(promise.targetPath);
-  let lastGrowthTime = Date.now();
 
   while (true) {
-    const currentSize = await getFileSize(promise.targetPath);
-
-    if (currentSize > lastSize) {
-      lastSize = currentSize;
-      lastGrowthTime = Date.now();
-      promise.lastKnownSize = currentSize;
-    } else if (currentSize > 0 && currentSize === lastSize) {
-      const timeSinceLastGrowth = Date.now() - lastGrowthTime;
-
-      if (timeSinceLastGrowth >= doneGracePeriod) {
-        return {
-          content: [{ type: "text", text: `Download complete: ${promise.targetPath} (${currentSize} bytes)` }],
-          details: { success: true, result: { path: promise.targetPath, size: currentSize } }
-        };
-      }
-      if (timeSinceLastGrowth >= stallTimeout) {
-        return {
-          content: [{ type: "text", text: `Download stalled: no progress for ${options.stallTimeout}s` }],
-          details: { success: false, error: `Stalled: no progress for ${options.stallTimeout}s` },
-          isError: true
-        };
-      }
-    }
-
     const current = getPromise(promise.id);
     if (!current || current.status === "cancelled") {
       return {
@@ -568,8 +540,8 @@ async function waitForDownload(
 
     if (current.status === "completed") {
       return {
-        content: [{ type: "text", text: `Download complete: ${promise.targetPath}` }],
-        details: { success: true, result: { path: promise.targetPath } }
+        content: [{ type: "text", text: `Download complete: ${promise.targetPath} (${current.lastKnownSize} bytes)` }],
+        details: { success: true, result: { path: promise.targetPath, size: current.lastKnownSize } }
       };
     }
 
@@ -577,6 +549,14 @@ async function waitForDownload(
       return {
         content: [{ type: "text", text: current.error ?? "Download failed" }],
         details: { success: false, error: current.error },
+        isError: true
+      };
+    }
+
+    if (Date.now() - (current.createdAt ?? Date.now()) >= stallTimeout) {
+      return {
+        content: [{ type: "text", text: `Download stalled: no progress for ${options.stallTimeout}s` }],
+        details: { success: false, error: `Stalled: no progress for ${options.stallTimeout}s` },
         isError: true
       };
     }
@@ -589,25 +569,20 @@ async function waitForDownload(
 // Content-Length Helper
 // =============================================================================
 
+/** Head request via fetch() — no external curl dependency. */
 async function getContentLength(url: string): Promise<number | undefined> {
   try {
-    const proc = spawn("curl", ["-sI", "-L", url]);
-    let output = "";
-    proc.stdout?.on("data", (data: Buffer) => { output += data.toString(); });
-    return await new Promise<number | undefined>((resolve) => {
-      proc.on("close", () => {
-        const match = output.match(/content-length:\s*(\d+)/i);
-        resolve(match ? parseInt(match[1], 10) : undefined);
-      });
-      proc.on("error", () => resolve(undefined));
-    });
+    const response = await fetch(url, { method: "HEAD" });
+    if (!response.ok) return undefined;
+    const length = response.headers.get("content-length");
+    return length ? parseInt(length, 10) : undefined;
   } catch {
     return undefined;
   }
 }
 
 // =============================================================================
-// Download Runner
+// Download Runner (fetch-based — no external curl dependency)
 // =============================================================================
 
 async function runDownload(promise: BackgroundPromise): Promise<void> {
@@ -620,84 +595,130 @@ async function runDownload(promise: BackgroundPromise): Promise<void> {
     return;
   }
 
+  // -- Head request for Content-Length (best-effort) --
+  if (!promise.totalSize) {
+    const contentLength = await getContentLength(promise.url);
+    if (contentLength !== undefined) {
+      promise.totalSize = contentLength;
+    }
+  }
+
+  const abortController = new AbortController();
+  _downloadControllers.set(promise.id, abortController);
+
+  promise.status = "running";
+  setPromise(promise);
+
+  // Status-bar refresh interval (lighter — progress tracked via stream)
+  const pollInterval = setInterval(() => _updateStatusBar(), 1000);
+  _progressTimers.set(promise.id, pollInterval);
+
   try {
-    // Fetch Content-Length (best-effort, before download starts)
-    if (!promise.totalSize) {
-      const contentLength = await getContentLength(promise.url);
-      if (contentLength !== undefined) {
-        promise.totalSize = contentLength;
-      }
+    const response = await fetch(promise.url, {
+      signal: abortController.signal,
+    });
+
+    if (!response.ok) {
+      promise.status = "failed";
+      promise.error = `HTTP ${response.status}: ${response.statusText}`;
+      promise.completedAt = Date.now();
+      setPromise(promise);
+      _downloadControllers.delete(promise.id);
+      clearInterval(pollInterval);
+      _progressTimers.delete(promise.id);
+      _updateStatusBar();
+      await runChainedPromise(promise);
+      return;
     }
 
-    promise.status = "running";
-    setPromise(promise);
+    // Update total size from response headers if not already set
+    if (!promise.totalSize) {
+      const length = response.headers.get("content-length");
+      if (length) promise.totalSize = parseInt(length, 10);
+    }
 
-    const proc = spawn("curl", ["-L", "-o", promise.targetPath, promise.url], {
-      stdio: "ignore",
-      detached: true,
-    });
-    promise.childPid = proc.pid;
-    setPromise(promise);
+    const reader = response.body!.getReader();
+    const fileStream = createWriteStream(promise.targetPath);
 
-    // Poll file size every 2s for live progress in status bar
-    const pollInterval = setInterval(async () => {
-      const p = getPromise(promise.id);
-      if (!p || p.status !== "running") {
-        clearInterval(pollInterval);
-        _progressTimers.delete(promise.id);
-        return;
-      }
-      p.lastKnownSize = await getFileSize(p.targetPath!);
-      setPromise(p);
-      _updateStatusBar();
-    }, 2000);
-    _progressTimers.set(promise.id, pollInterval);
+    let bytesDownloaded = 0;
 
-    await new Promise<void>((resolve) => {
-      const cleanup = () => {
-        const timer = _progressTimers.get(promise.id);
-        if (timer) {
-          clearInterval(timer);
-          _progressTimers.delete(promise.id);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        fileStream.write(Buffer.from(value));
+        bytesDownloaded += value.length;
+        promise.lastKnownSize = bytesDownloaded;
+        setPromise(promise);
+
+        // Check for external cancellation (promise-cancel or replace)
+        // Re-read from map to get the latest status (may have been changed by promise-cancel)
+        if (getPromise(promise.id)?.status === "cancelled") {
+          abortController.abort();
+          break;
         }
-      };
+      }
 
-      proc.on("close", (code: number | null) => {
-        cleanup();
-        if (promise.status !== "cancelled") {
-          if (code === 0) {
+      await new Promise<void>((resolve, reject) => {
+        fileStream.end();
+        fileStream.on("finish", () => {
+          const latest = getPromise(promise.id);
+          if (latest && latest.status !== "cancelled") {
             promise.status = "completed";
             promise.result = { path: promise.targetPath };
-          } else {
-            promise.status = "failed";
-            promise.error = `curl exited with code ${code}`;
           }
-        }
-        promise.completedAt = Date.now();
-        setPromise(promise);
-        resolve();
+          promise.completedAt = Date.now();
+          setPromise(promise);
+          resolve();
+        });
+        fileStream.on("error", (err: Error) => {
+          const latest = getPromise(promise.id);
+          if (latest && latest.status !== "cancelled") {
+            promise.status = "failed";
+            promise.error = err.message;
+          }
+          promise.completedAt = Date.now();
+          setPromise(promise);
+          resolve();
+        });
       });
-      proc.on("error", (err: Error) => {
-        cleanup();
-        if (promise.status !== "cancelled") {
+    } catch (streamErr) {
+      // AbortError from cancellation is expected — don't overwrite status
+      if (streamErr instanceof DOMException && streamErr.name === "AbortError") {
+        // Status already set to "cancelled" by promise-cancel or the loop above
+      } else {
+        const latest = getPromise(promise.id);
+        if (!latest || latest.status !== "cancelled") {
           promise.status = "failed";
-          promise.error = err.message;
+          promise.error = streamErr instanceof Error ? streamErr.message : String(streamErr);
+          promise.completedAt = Date.now();
+          setPromise(promise);
         }
+      }
+    } finally {
+      fileStream.destroy();
+      _downloadControllers.delete(promise.id);
+      clearInterval(pollInterval);
+      _progressTimers.delete(promise.id);
+      _updateStatusBar();
+    }
+  } catch (fetchErr) {
+    // AbortError from cancellation is expected — don't overwrite status
+    if (fetchErr instanceof DOMException && fetchErr.name === "AbortError") {
+      // Status already set by promise-cancel or the inner loop
+    } else {
+      const latest = getPromise(promise.id);
+      if (!latest || latest.status !== "cancelled") {
+        promise.status = "failed";
+        promise.error = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
         promise.completedAt = Date.now();
         setPromise(promise);
-        resolve();
-      });
-    });
-  } catch (err) {
-    const timer = _progressTimers.get(promise.id);
-    if (timer) {
-      clearInterval(timer);
-      _progressTimers.delete(promise.id);
+      }
     }
-    promise.status = "failed";
-    promise.error = err instanceof Error ? err.message : String(err);
-    promise.completedAt = Date.now();
-    setPromise(promise);
+    _downloadControllers.delete(promise.id);
+    clearInterval(pollInterval);
+    _progressTimers.delete(promise.id);
+    _updateStatusBar();
   }
 
   await runChainedPromise(promise);
@@ -901,6 +922,9 @@ function cancelAllPromises(): void {
           // May have already exited
         }
       }
+      // Abort in-flight fetch download
+      const ac = _downloadControllers.get(promise.id);
+      if (ac) { ac.abort(); _downloadControllers.delete(promise.id); }
       // Clear progress polling
       const timer = _progressTimers.get(promise.id);
       if (timer) {
@@ -1120,6 +1144,8 @@ function registerTools(pi: ExtensionAPI): void {
               if (existing.childPid) {
                 try { process.kill(existing.childPid, "SIGTERM"); } catch {}
               }
+              const existingDownloadAc = _downloadControllers.get(existing.id);
+              if (existingDownloadAc) { existingDownloadAc.abort(); _downloadControllers.delete(existing.id); }
               const timer = _progressTimers.get(existing.id);
               if (timer) { clearInterval(timer); _progressTimers.delete(existing.id); }
               // Cascade cancellation to children
@@ -1132,6 +1158,8 @@ function registerTools(pi: ExtensionAPI): void {
                 child.error = `Parent ${current.id} was cancelled (replaced)`;
                 child.completedAt = Date.now();
                 if (child.childPid) { try { process.kill(child.childPid, "SIGTERM"); } catch {} }
+                const childDownloadAc = _downloadControllers.get(child.id);
+                if (childDownloadAc) { childDownloadAc.abort(); _downloadControllers.delete(child.id); }
                 const childTimer = _progressTimers.get(child.id);
                 if (childTimer) { clearInterval(childTimer); _progressTimers.delete(child.id); }
                 setPromise(child);
@@ -1159,7 +1187,7 @@ function registerTools(pi: ExtensionAPI): void {
                   existingResult: existing.result,
                   previousResult: existing.previousResult,
                   willChain: false,
-                  thenCondition: undefined as ("always" | "on-success" | "on-failure" | undefined),
+                  thenCondition: undefined as (ThenCondition | undefined),
                   error: existing.error ?? "",
                 },
               };
@@ -1170,7 +1198,7 @@ function registerTools(pi: ExtensionAPI): void {
         const isDownload = !!args.download;
         const name = args.name ?? (isDownload ? "download" : "command");
 
-        const thenCondition = (args.thenCondition as "always" | "on-success" | "on-failure" | undefined) ?? "always";
+        const thenCondition = (args.thenCondition as ThenCondition | undefined) ?? "always";
 
         const promise: BackgroundPromise = {
           id: generatePromiseId(),
@@ -1236,7 +1264,7 @@ function registerTools(pi: ExtensionAPI): void {
             type: promise.type,
             status: "started",
             willChain: !!args.then,
-            thenCondition: thenCondition as ("always" | "on-success" | "on-failure" | undefined),
+            thenCondition: thenCondition as (ThenCondition | undefined),
             dedup: false,
             replace: args.replace ?? false,
             existingResult: undefined,
@@ -1640,7 +1668,7 @@ function registerTools(pi: ExtensionAPI): void {
 
         // ---- Validate condition ----
         const validConditions = ["always", "on-success", "on-failure"];
-        const condition = (args.condition ?? "always") as "always" | "on-success" | "on-failure";
+        const condition = (args.condition ?? "always") as ThenCondition;
         if (!validConditions.includes(condition)) {
           return { content: [{ type: "text", text: `Invalid condition: ${args.condition}. Use: always, on-success, on-failure` }], details: { success: false, error: "Invalid condition" } as any, isError: true };
         }
@@ -1763,6 +1791,9 @@ function registerTools(pi: ExtensionAPI): void {
             // Process may have already exited
           }
         }
+        // Abort in-flight fetch download
+        const downloadAc = _downloadControllers.get(promise.id);
+        if (downloadAc) { downloadAc.abort(); _downloadControllers.delete(promise.id); }
         // Clean up progress polling timer
         const timer = _progressTimers.get(promise.id);
         if (timer) {
@@ -1783,6 +1814,8 @@ function registerTools(pi: ExtensionAPI): void {
           if (child.childPid) {
             try { process.kill(child.childPid, "SIGTERM"); } catch {}
           }
+          const childDownloadAc = _downloadControllers.get(child.id);
+          if (childDownloadAc) { childDownloadAc.abort(); _downloadControllers.delete(child.id); }
           const childTimer = _progressTimers.get(child.id);
           if (childTimer) {
             clearInterval(childTimer);
@@ -1840,30 +1873,24 @@ function registerTools(pi: ExtensionAPI): void {
         // ---- Validate target ----
         const promise = getPromise(args.promiseId);
         if (!promise) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: `Promise not found: ${args.promiseId}` }], details: { success: false, error: `Promise not found: ${args.promiseId}` } as any, isError: true };
         }
         if (promise.status === "cancelled") {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: "Cannot chain to cancelled promise" }], details: { success: false, error: "Promise is cancelled" } as any, isError: true };
         }
         if (!args.command && !args.download) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: "Either command or download must be provided" }], details: { success: false, error: "Missing command or download" } as any, isError: true };
         }
         if (args.command && args.download) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: "Provide either command or download, not both" }], details: { success: false, error: "Both command and download provided" } as any, isError: true };
         }
         if (args.download && !args.path) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: "path is required when downloading" }], details: { success: false, error: "Missing path for download" } as any, isError: true };
         }
 
         const validConditions = ["always", "on-success", "on-failure"];
-        const condition = (args.condition ?? "always") as "always" | "on-success" | "on-failure";
+        const condition = (args.condition ?? "always") as ThenCondition;
         if (!validConditions.includes(condition)) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: `Invalid condition: ${args.condition}. Use: always, on-success, on-failure` }], details: { success: false, error: `Invalid condition: ${args.condition}` } as any, isError: true };
         }
 

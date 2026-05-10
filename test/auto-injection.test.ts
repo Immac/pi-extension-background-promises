@@ -7,7 +7,7 @@
  * Run: npx tsx test/auto-injection.test.ts
  */
 
-import { mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -857,4 +857,16 @@ async function main() {
 main().catch((err) => {
   console.error("\n❌ Test suite failed:", err.message);
   process.exit(1);
+}).finally(() => {
+  // Clean up temp directory
+  try {
+    const tmpDir = join(tmpdir(), "promise-test-");
+    for (const entry of readdirSync(tmpdir())) {
+      if (entry.startsWith("promise-test-")) {
+        rmSync(join(tmpdir(), entry), { recursive: true, force: true });
+      }
+    }
+  } catch {
+    // Best-effort cleanup
+  }
 });
