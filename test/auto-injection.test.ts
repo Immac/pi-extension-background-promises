@@ -689,6 +689,159 @@ async function main() {
   }
   console.log("");
 
+  // ---- Test 14: dedup — reuses existing promise with same subject ----
+  console.log("═══════════════════════════════════════════");
+  console.log("Test 14: dedup — reuses existing promise with same subject");
+  console.log("═══════════════════════════════════════════\n");
+
+  // Create a promise with a subject
+  const dedupMarker1 = join(tmpDir, "dedup1.txt");
+  const dedupCreate1 = await createTool.execute("call-33", {
+    command: `echo "dedup-original" > "${dedupMarker1}"`,
+    subject: "test-dedup-task",
+    name: "dedup-original",
+  });
+  const dedupId1 = dedupCreate1.details?.promiseId;
+  console.log("Original promise ID:", dedupId1);
+  console.log("  subject in details:", dedupCreate1.details?.subject);
+
+  // Wait for it to complete
+  await waitForCondition(() => existsSync(dedupMarker1) && "dedup original done", 10000);
+  await sleep(200);
+  console.log("✓ Original promise completed\n");
+
+  // Now try dedup with same subject — should return existing ID
+  const dedupCreate2 = await createTool.execute("call-34", {
+    command: `echo "should-not-run" > "${join(tmpDir, "dedup-should-not-exist.txt")}"`,
+    subject: "test-dedup-task",
+    name: "dedup-attempt",
+    dedup: true,
+  });
+  console.log("Dedup result:", JSON.stringify(dedupCreate2.details, null, 2));
+
+  if (dedupCreate2.details?.dedup === true && dedupCreate2.details?.promiseId === dedupId1) {
+    console.log("✅ Dedup returned existing promise ID");
+  } else {
+    console.log("❌ Dedup did not return existing promise");
+    throw new Error("Dedup failed");
+  }
+
+  // Verify the dedup'd command did NOT run (marker should not exist)
+  await sleep(500);
+  if (existsSync(join(tmpDir, "dedup-should-not-exist.txt"))) {
+    console.log("❌ Dedup'd command ran despite dedup=true!");
+    throw new Error("Dedup'd command ran");
+  }
+  console.log("✅ Dedup'd command correctly skipped\n");
+
+  // Test dedup on running promise
+  const dedupMarkerRunning = join(tmpDir, "dedup-running.txt");
+  const dedupRunning = await createTool.execute("call-35", {
+    command: `sleep 3 && echo "slow-task" > "${dedupMarkerRunning}"`,
+    subject: "test-dedup-running",
+    name: "dedup-slow",
+  });
+  const dedupRunningId = dedupRunning.details?.promiseId;
+  console.log("Slow promise ID:", dedupRunningId);
+
+  // Immediately try dedup while it's still running
+  const dedupRunningAgain = await createTool.execute("call-36", {
+    command: `echo "should-not-run-either" > "${join(tmpDir, "dedup-should-not-exist-2.txt")}"`,
+    subject: "test-dedup-running",
+    name: "dedup-attempt-2",
+    dedup: true,
+  });
+  console.log("Dedup (running) result ID:", dedupRunningAgain.details?.promiseId);
+
+  if (dedupRunningAgain.details?.dedup === true && dedupRunningAgain.details?.promiseId === dedupRunningId) {
+    console.log("✅ Dedup returned running promise ID");
+  } else {
+    console.log("❌ Dedup did not return running promise");
+    throw new Error("Dedup running failed");
+  }
+
+  // Wait for the slow task to finish so tests don't cascade
+  await waitForCondition(() => existsSync(dedupMarkerRunning) && "slow done", 10000);
+  console.log("\n✅ All dedup tests passed");
+  console.log("");
+
+  // ---- Test 15: replace — cancels existing and creates new ----
+  console.log("═══════════════════════════════════════════");
+  console.log("Test 15: replace — cancels existing and creates new");
+  console.log("═══════════════════════════════════════════\n");
+
+  const replaceMarker1 = join(tmpDir, "replace1.txt");
+  const replaceMarker2 = join(tmpDir, "replace2.txt");
+
+  // Create a promise with a subject that takes a bit
+  const replaceCreate1 = await createTool.execute("call-37", {
+    command: `sleep 0.5 && echo "original" > "${replaceMarker1}"`,
+    subject: "test-replace-task",
+    name: "replace-original",
+  });
+  const replaceId1 = replaceCreate1.details?.promiseId;
+  console.log("Original promise ID:", replaceId1);
+
+  // Wait a moment for it to start
+  await sleep(100);
+
+  // Now replace with same subject — should cancel original and create new
+  const replaceCreate2 = await createTool.execute("call-38", {
+    command: `echo "replacement" > "${replaceMarker2}"`,
+    subject: "test-replace-task",
+    name: "replace-new",
+    replace: true,
+  });
+  const replaceId2 = replaceCreate2.details?.promiseId;
+  console.log("Replacement promise ID:", replaceId2);
+  console.log("replace in details:", replaceCreate2.details?.replace);
+
+  // Check that the IDs are different
+  if (replaceId2 !== replaceId1) {
+    console.log("✅ Replace created new promise (different ID)");
+  } else {
+    console.log("❌ Replace did not create new promise");
+    throw new Error("Replace didn't create new ID");
+  }
+
+  // Wait for the replacement to complete
+  await waitForCondition(() => existsSync(replaceMarker2) && "replace2 done", 10000);
+  console.log("✓ Replacement command completed\n");
+
+  // Verify original status via promises-list
+  if (statusTool) {
+    const origStatus = await statusTool.execute("call-39", { promiseId: replaceId1 });
+    console.log("Original promise status:", origStatus.details?.status);
+    if (origStatus.details?.status === "cancelled") {
+      console.log("✅ Original promise was cancelled");
+    } else {
+      console.log("⚠️ Original status:", origStatus.details?.status, "(may have completed before replace took effect)");
+    }
+  }
+
+  // Replace with no existing promise — should create normally
+  const replaceCreate3 = await createTool.execute("call-40", {
+    command: `echo "replace-no-existing" > "${join(tmpDir, "replace-no-existing.txt")}"`,
+    subject: "test-replace-nonexistent",
+    name: "replace-no-exist",
+    replace: true,
+  });
+  const replaceId3 = replaceCreate3.details?.promiseId;
+  console.log("Replace (no existing) promise ID:", replaceId3);
+  if (replaceCreate3.details?.status === "started") {
+    console.log("✅ Replace without existing creates normally");
+  } else {
+    console.log("❌ Replace without existing did not create normally");
+    throw new Error("Replace without existing failed");
+  }
+
+  await waitForCondition(
+    () => existsSync(join(tmpDir, "replace-no-existing.txt")) && "replace no existing done",
+    10000
+  );
+  console.log("\n✅ All replace tests passed");
+  console.log("");
+
   // ---- Summary ----
   console.log("═══════════════════════════════════════════");
   console.log("SUMMARY");

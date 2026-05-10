@@ -240,6 +240,109 @@ Press F4 to collapse
 | Promise notification for already-done work | Result is stale — skip it |
 | Unsure what promises exist | Call `promises-list()` — check `subject` fields |
 
+### 🎯 Dedup and Replace — Programmatic Duplicate Prevention
+
+Beyond manual checking, the promise system has built-in dedup and replace semantics via `promise-create` parameters. These let the LLM declaratively say "don't duplicate this work" or "replace the old version of this work".
+
+#### `dedup=true` — Reuse existing work
+
+When a promise with the same `subject` already exists (and hasn't failed or been cancelled), `dedup=true` skips creation and returns the existing promise's ID. The LLM can then monitor or await the existing promise instead of starting redundant work.
+
+```
+// First call: creates a new promise
+promise-create(command="npm test", subject="run test suite", name="test-suite")
+→ promiseId: "promise-abc"
+
+// Second call (same subject): dedup finds the running promise, returns its ID
+promise-create(command="npm test", subject="run test suite", name="test-suite", dedup=true)
+→ "Dedup: promise with subject 'run test suite' currently running — returning existing promise-abc"
+
+// The LLM now knows promise-abc covers this work and can await it if needed
+```
+
+**Dedup behavior by existing promise status:**
+
+| Existing status | Dedup action |
+|----------------|-------------|
+| `pending` or `running` | Return existing ID — don't duplicate |
+| `completed` | Return existing ID — result already available |
+| `failed` | Create new — old one didn't succeed, retry |
+| `cancelled` | Create new — old one was cancelled, start fresh |
+
+> **Why return completed promises?** The LLM may have been reset, restarted, or forgotten about the earlier work. Returning the completed promise lets it get the result without re-execution.
+
+#### `replace=true` — Cancel and restart
+
+When the work has changed (e.g., code was modified and tests need re-running), `replace=true` atomically cancels any existing promise with the same `subject` and creates a fresh one. This is the pattern for "re-run after changes".
+
+```
+// First run
+promise-create(command="npm test", subject="run test suite", name="test-suite")
+→ promiseId: "promise-abc"
+
+// ... modify code ...
+
+// Replace: cancels promise-abc, creates promise-def
+promise-create(command="npm test", subject="run test suite", name="test-suite", replace=true)
+→ "Started command: promise-def — replaced previous run"
+// promise-abc is cancelled with reason "Replaced by new promise with same subject"
+// Its children are also cancelled (cascade)
+```
+
+**Replace cascades to children:** If the replaced promise has a chain (e.g., test → build → deploy), all children are also cancelled. The new promise starts clean.
+
+#### When to use each
+
+| Situation | Use |
+|-----------|-----|
+| Same exact job, already running | `dedup=true` — let the original finish |
+| Same exact job, already done | `dedup=true` — use cached result |
+| Modified code, need re-run | `replace=true` — cancel old, start new |
+| Changed requirements | `replace=true` — discard stale work |
+| First time running this task | Neither — just create normally |
+| Not sure if something is already running | `dedup=true` — safe either way |
+
+#### Combined example: edit-test loop
+
+```
+// Step 1: Run initial tests
+promise-create(
+  command="npm test",
+  subject="run tests",
+  name="test-suite"
+)
+→ promiseId: "promise-abc"
+
+// Step 2: While tests run, fix a bug
+read(path="./src/buggy.ts")
+edit(path="./src/buggy.ts", edits=[{oldText: "bug", newText: "fix"}])
+
+// Step 3: Tests are stale now — replace with fresh run
+promise-create(
+  command="npm test",
+  subject="run tests",
+  name="test-suite",
+  replace=true            ← cancels old, starts new
+)
+→ "Started command: promise-def — replaced previous run"
+
+// Step 4: Review another file while new tests run
+read(path="./src/other.ts")
+
+🔔 Promise "test-suite" (promise-def) completed!
+  Result: { output: "PASS 43/43 tests" }
+```
+
+#### Implementation detail
+
+Both `dedup` and `replace` match on the **exact `subject` string**. Use consistent, descriptive subjects like:
+- `"run tests"` — for test suites
+- `"build project"` — for builds
+- `"download model v2"` — for downloads (include version in subject)
+- `"lint check"` — for linting
+
+Subjects are case-sensitive and must match exactly for dedup/replace to work.
+
 ## When NOT to use promises
 
 - **Reading small files** — just use `read()`

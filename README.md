@@ -38,7 +38,7 @@ Agent: "Download complete. Here's my review of train.py..."
 
 | Tool | Description |
 |------|-------------|
-| `promise-create` | Start a background task (command or download). Returns immediately. Result auto-delivers. Accepts `then` + `thenCondition` for initial chaining. |
+| `promise-create` | Start a background task (command or download). Returns immediately. Result auto-delivers. Accepts `subject` (semantic label), `dedup` (reuse existing with same subject), `replace` (cancel & restart with same subject), and `then` + `thenCondition` for initial chaining. |
 | `promise-then` | Chain a command or download **after** any existing promise. Multiple calls create a sequence. Supports `condition`: `always` (default), `on-success`, `on-failure`. Returns full chain visualization. |
 | `promise-graph` | Inspect chain relationships — tree view for a specific promise or all chains. |
 | `promise-rechain` | Re-attach a cancelled/failed promise's command to a different parent chain. |
@@ -138,6 +138,41 @@ promise-then(
 ```
 
 If a condition isn't met, a "skipped" promise is created (status `cancelled`) with a message explaining why.
+
+### 🚫 Dedup — Don't Duplicate Work (`dedup=true`)
+
+When a promise with the same `subject` already exists (running or completed), `dedup=true` returns the existing promise's ID instead of creating a new one. The LLM avoids redundant work:
+
+```
+// First call: normal creation
+promise-create(command="npm test", subject="run test suite")
+→ promiseId: "promise-abc"
+
+// Second call: dedup finds the running promise, returns its ID
+promise-create(command="npm test", subject="run test suite", dedup=true)
+→ "Dedup: promise with subject 'run test suite' currently running — returning existing promise-abc"
+```
+
+**Dedup behavior by existing status:**
+- `running`/`pending` → return existing ID
+- `completed` → return existing ID (result available)
+- `failed`/`cancelled` → create new (retry)
+
+### 🔄 Replace — Cancel & Restart (`replace=true`)
+
+When work has changed (e.g., code was modified and tests need re-running), `replace=true` atomically cancels any existing promise with the same `subject` and creates a fresh one. Cancellation cascades to all children in the chain:
+
+```
+// First run
+promise-create(command="npm test", subject="run test suite")
+→ promiseId: "promise-abc"
+
+// ... modify code ...
+
+// Replace: cancels promise-abc, creates new promise
+promise-create(command="npm test", subject="run test suite", replace=true)
+→ "Started command: promise-def — replaced previous run"
+```
 
 ### 🔄 Re-Chaining After Failure (`promise-rechain`)
 

@@ -95,6 +95,17 @@ function setPromise(promise: BackgroundPromise): void {
   promises.set(promise.id, promise);
 }
 
+/**
+ * Find a promise by its exact subject string.
+ * Used by dedup and replace semantics.
+ */
+function findPromiseBySubject(subject: string): BackgroundPromise | undefined {
+  for (const [, p] of promises) {
+    if (p.subject === subject) return p;
+  }
+  return undefined;
+}
+
 // =============================================================================
 // Chain Helpers
 // =============================================================================
@@ -1072,6 +1083,8 @@ function registerTools(pi: ExtensionAPI): void {
         "Use the 'then' parameter to chain a command that runs automatically after the first completes.",
         "Do NOT use promise-await unless you have absolutely no other work to do. Chain follow-ups with promise-then instead.",
         "CRITICAL — Do NOT duplicate the promise's work: Once you create a promise with a subject, trust it to handle that task. Do NOT start working on the same thing yourself. If you receive a promise completion notification for something you've already handled, the result is stale — just acknowledge and move on.",
+        "DEDUP: Use dedup=true + subject=... to avoid creating duplicate promises. If a promise with the same subject already exists (and hasn't failed), the existing promise's ID is returned instead of creating a new one.",
+        "REPLACE: Use replace=true + subject=... to cancel an existing promise with the same subject and create a fresh one. This is the pattern for 're-run tests after code changes'.",
       ],
       parameters: Type.Object({
         download: Type.Optional(Type.String({ description: "URL to download" })),
@@ -1080,6 +1093,9 @@ function registerTools(pi: ExtensionAPI): void {
         then: Type.Optional(Type.String({ description: "Command to run after this one completes (chain)" })),
         thenCondition: Type.Optional(Type.String({ description: "Chain condition: 'always' (default), 'on-success', or 'on-failure'" })),
         name: Type.Optional(Type.String({ description: "Optional name for this promise" })),
+        subject: Type.Optional(Type.String({ description: "Semantic label for dedup/replace matching. Use with dedup=true to avoid duplicates, or replace=true to cancel-and-restart." })),
+        dedup: Type.Optional(Type.Boolean({ description: "Skip creation if a promise with the same subject already exists (and hasn't failed). Returns the existing promise instead." })),
+        replace: Type.Optional(Type.Boolean({ description: "Cancel any existing promise with the same subject before creating a new one. Use when re-running a task after changes." })),
       }),
       async execute(_toolCallId: string, args: {
         download?: string;
@@ -1088,7 +1104,69 @@ function registerTools(pi: ExtensionAPI): void {
         then?: string;
         thenCondition?: string;
         name?: string;
+        subject?: string;
+        dedup?: boolean;
+        replace?: boolean;
       }) {
+        // ---- Dedup / Replace: Check for existing promise with same subject ----
+        if (args.subject) {
+          if (args.replace) {
+            // REPLACE: Cancel existing promise with same subject, then create new
+            const existing = findPromiseBySubject(args.subject);
+            if (existing && (existing.status === "pending" || existing.status === "running")) {
+              existing.status = "cancelled";
+              existing.error = "Replaced by new promise with same subject";
+              existing.completedAt = Date.now();
+              if (existing.childPid) {
+                try { process.kill(existing.childPid, "SIGTERM"); } catch {}
+              }
+              const timer = _progressTimers.get(existing.id);
+              if (timer) { clearInterval(timer); _progressTimers.delete(existing.id); }
+              // Cascade cancellation to children
+              let current = existing;
+              while (current.thenPromiseId) {
+                const child = getPromise(current.thenPromiseId);
+                if (!child) break;
+                if (child.status === "completed" || child.status === "failed") break;
+                child.status = "cancelled";
+                child.error = `Parent ${current.id} was cancelled (replaced)`;
+                child.completedAt = Date.now();
+                if (child.childPid) { try { process.kill(child.childPid, "SIGTERM"); } catch {} }
+                const childTimer = _progressTimers.get(child.id);
+                if (childTimer) { clearInterval(childTimer); _progressTimers.delete(child.id); }
+                setPromise(child);
+                current = child;
+              }
+              setPromise(existing);
+              notifyCompletion(existing);
+            }
+          } else if (args.dedup) {
+            // DEDUP: Return existing promise if same subject exists and not failed
+            const existing = findPromiseBySubject(args.subject);
+            if (existing && existing.status !== "failed" && existing.status !== "cancelled") {
+              const statusDesc = existing.status === "completed" ? "already completed" : `currently ${existing.status}`;
+              const text = `Dedup: promise with subject "${args.subject}" ${statusDesc} — returning existing ${existing.id}`;
+              return {
+                content: [{ type: "text", text }],
+                details: {
+                  promiseId: existing.id,
+                  name: existing.name,
+                  subject: existing.subject,
+                  type: existing.type,
+                  status: existing.status as string,
+                  dedup: true,
+                  replace: false,
+                  existingResult: existing.result,
+                  previousResult: existing.previousResult,
+                  willChain: false,
+                  thenCondition: undefined as ("always" | "on-success" | "on-failure" | undefined),
+                  error: existing.error ?? "",
+                },
+              };
+            }
+          }
+        }
+
         const isDownload = !!args.download;
         const name = args.name ?? (isDownload ? "download" : "command");
 
@@ -1097,6 +1175,7 @@ function registerTools(pi: ExtensionAPI): void {
         const promise: BackgroundPromise = {
           id: generatePromiseId(),
           name,
+          subject: args.subject,
           type: isDownload ? "download" : "command",
           status: "pending",
           url: args.download,
@@ -1143,11 +1222,27 @@ function registerTools(pi: ExtensionAPI): void {
         const subjectInfo = promise.subject
           ? ` — ${promise.subject}`
           : "";
-        const text = `Started ${promise.type}: ${promise.id}${subjectInfo}${chainInfo}`;
+        const replaceInfo = args.replace
+          ? " — replaced previous run"
+          : "";
+        const text = `Started ${promise.type}: ${promise.id}${subjectInfo}${chainInfo}${replaceInfo}`;
 
         return {
           content: [{ type: "text", text }],
-          details: { promiseId: promise.id, name: promise.name, subject: promise.subject, type: promise.type, status: "started", willChain: !!args.then, thenCondition },
+          details: {
+            promiseId: promise.id,
+            name: promise.name,
+            subject: promise.subject,
+            type: promise.type,
+            status: "started",
+            willChain: !!args.then,
+            thenCondition: thenCondition as ("always" | "on-success" | "on-failure" | undefined),
+            dedup: false,
+            replace: args.replace ?? false,
+            existingResult: undefined,
+            previousResult: undefined,
+            error: "",
+          },
         };
       },
     })
