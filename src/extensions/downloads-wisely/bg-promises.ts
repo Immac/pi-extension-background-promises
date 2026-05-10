@@ -1840,30 +1840,24 @@ function registerTools(pi: ExtensionAPI): void {
         // ---- Validate target ----
         const promise = getPromise(args.promiseId);
         if (!promise) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: `Promise not found: ${args.promiseId}` }], details: { success: false, error: `Promise not found: ${args.promiseId}` } as any, isError: true };
         }
         if (promise.status === "cancelled") {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: "Cannot chain to cancelled promise" }], details: { success: false, error: "Promise is cancelled" } as any, isError: true };
         }
         if (!args.command && !args.download) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: "Either command or download must be provided" }], details: { success: false, error: "Missing command or download" } as any, isError: true };
         }
         if (args.command && args.download) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: "Provide either command or download, not both" }], details: { success: false, error: "Both command and download provided" } as any, isError: true };
         }
         if (args.download && !args.path) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: "path is required when downloading" }], details: { success: false, error: "Missing path for download" } as any, isError: true };
         }
 
         const validConditions = ["always", "on-success", "on-failure"];
         const condition = (args.condition ?? "always") as "always" | "on-success" | "on-failure";
         if (!validConditions.includes(condition)) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return { content: [{ type: "text", text: `Invalid condition: ${args.condition}. Use: always, on-success, on-failure` }], details: { success: false, error: `Invalid condition: ${args.condition}` } as any, isError: true };
         }
 
