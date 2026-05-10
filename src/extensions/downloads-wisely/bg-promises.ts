@@ -230,8 +230,18 @@ function buildAllChainsText(): string[] {
 
 let _notifyCompletion: ((promise: BackgroundPromise) => void) | undefined;
 
+/**
+ * Promises being explicitly awaited via promise-await.
+ * notifyCompletion skips these — the result already went to the LLM directly.
+ */
+const _awaitedPromises = new Set<string>();
+
 function notifyCompletion(promise: BackgroundPromise): void {
   if (promise.notified) return;
+  // If the LLM explicitly awaited this promise, the result was already
+  // returned directly from promise-await. Suppress the notification to
+  // avoid a duplicate follow-up turn.
+  if (_awaitedPromises.has(promise.id)) return;
   promise.notified = true;
   try {
     _notifyCompletion?.(promise);
@@ -1177,6 +1187,11 @@ function registerTools(pi: ExtensionAPI): void {
             isError: true
           };
         }
+
+        // Mark as explicitly awaited BEFORE returning — notifyCompletion
+        // checks this set and suppresses the auto-notification to avoid
+        // a duplicate follow-up turn when the LLM already has the result.
+        _awaitedPromises.add(args.promiseId);
 
         if (promise.status === "completed") {
           // Include result in details for agent use
