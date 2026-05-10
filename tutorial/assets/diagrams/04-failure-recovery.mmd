@@ -1,0 +1,25 @@
+flowchart TD
+    subgraph "Initial attempt"
+        A["create conda env"] -->|"on-success"| B["build"]
+    end
+    A -->|"FAILED ❌"| X["✗ env creation failed"]
+    X --> Y["build — CANCELLED (parent failed)"]
+
+    subgraph "Recovery with promise-rechain"
+        C["promise-create(command=&quot;conda create...&quot;)"]
+        D["promise-rechain(fromPromiseId=build,&nbsp;toPromiseId=new-env)"]
+        E["new-env succeeds ✅"]
+        F["build runs again (same command)"]
+    end
+
+    Y -..->|"solution"| C
+    C --> D
+    D --> E --> F
+
+    style A fill:#fecaca,stroke:#dc2626
+    style X fill:#fecaca,stroke:#dc2626
+    style Y fill:#fef3c7,stroke:#d97706
+    style C fill:#dbeafe,stroke:#2563eb
+    style D fill:#dbeafe,stroke:#2563eb
+    style E fill:#f0fdf4,stroke:#16a34a
+    style F fill:#f0fdf4,stroke:#16a34a

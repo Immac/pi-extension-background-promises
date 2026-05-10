@@ -1,0 +1,22 @@
+flowchart LR
+    subgraph "Creation"
+        A["promise-create(command=&quot;preprocess.py&quot;)"]
+    end
+    subgraph "Chaining"
+        B["promise-then(promiseId, command=&quot;train.py&quot;)"]
+        C["promise-then(promiseId, command=&quot;eval.py&quot;)"]
+    end
+    subgraph "Execution"
+        D["preprocess.py"]
+        E["train.py"]
+        F["eval.py"]
+    end
+    A --> B --> C
+    B -.-> D --> E --> F
+
+    style A fill:#dbeafe,stroke:#2563eb
+    style B fill:#dbeafe,stroke:#2563eb
+    style C fill:#dbeafe,stroke:#2563eb
+    style D fill:#f0fdf4,stroke:#16a34a
+    style E fill:#f0fdf4,stroke:#16a34a
+    style F fill:#f0fdf4,stroke:#16a34a

@@ -1,0 +1,17 @@
+flowchart TD
+    A["promise-create(command=&quot;train.py&quot;,&nbsp;then=&quot;eval.py&quot;,&nbsp;thenCondition=&quot;on-success&quot;)"]
+    A --> B["train.py runs"]
+    B --> C{"Exit code = 0?"}
+    C -->|"Yes ✅"| D["eval.py runs"]
+    C -->|"No ❌"| E["eval.py skipped (cancelled)"]
+    E --> F["🔔 Notification: skipped — parent failed"]
+
+    D --> G["🔔 Notification: eval complete"]
+
+    style A fill:#dbeafe,stroke:#2563eb
+    style B fill:#f0fdf4,stroke:#16a34a
+    style C fill:#fef3c7,stroke:#d97706
+    style D fill:#f0fdf4,stroke:#16a34a
+    style E fill:#fecaca,stroke:#dc2626
+    style F fill:#fef3c7,stroke:#d97706
+    style G fill:#f0fdf4,stroke:#16a34a

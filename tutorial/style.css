@@ -1,0 +1,174 @@
+@page {
+  size: A4;
+  margin: 2.2cm 1.8cm;
+  @top-center {
+    content: "bg-promises — User Manual";
+    font-size: 7pt;
+    color: #999;
+  }
+  @bottom-center {
+    content: counter(page);
+    font-size: 8pt;
+    color: #999;
+  }
+}
+
+body {
+  font-family: 'Helvetica Neue', Arial, sans-serif;
+  font-size: 10pt;
+  line-height: 1.5;
+  color: #1a1a1a;
+}
+
+h1 {
+  font-size: 18pt;
+  color: #1e3a5f;
+  border-bottom: 3px solid #2563eb;
+  padding-bottom: 4pt;
+  page-break-before: always;
+}
+h1:first-of-type { page-break-before: avoid; }
+
+h2 {
+  font-size: 13pt;
+  color: #2563eb;
+  border-bottom: 1px solid #d0d7de;
+  padding-bottom: 2pt;
+  margin-top: 1.2cm;
+}
+
+h3 {
+  font-size: 11pt;
+  color: #1e3a5f;
+  margin-top: 0.6cm;
+}
+
+img {
+  max-width: 100%;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  margin: 0.4cm auto;
+  display: block;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.3cm 0;
+  font-size: 9pt;
+}
+
+th {
+  background: #2563eb;
+  color: white;
+  padding: 6pt 8pt;
+  text-align: left;
+}
+
+td {
+  padding: 4pt 8pt;
+  border-bottom: 1px solid #d0d7de;
+}
+
+tr:nth-child(even) td {
+  background: #f6f8fa;
+}
+
+code {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 8.5pt;
+  background: #f0f4f8;
+  padding: 1pt 4pt;
+  border-radius: 3px;
+}
+
+pre code {
+  display: block;
+  padding: 8pt;
+  background: #1e293b;
+  color: #e2e8f0;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 8pt;
+  line-height: 1.4;
+}
+
+.cover-page {
+  page-break-after: always;
+  text-align: center;
+  padding-top: 4cm;
+}
+
+.cover-page h1 {
+  font-size: 26pt;
+  border: none;
+  color: #1e3a5f;
+  margin-bottom: 0;
+}
+
+.cover-page .subtitle {
+  font-size: 14pt;
+  color: #64748b;
+  margin-top: 0.5cm;
+}
+
+.cover-page .meta {
+  margin-top: 3cm;
+  font-size: 10pt;
+  color: #94a3b8;
+}
+
+.image-caption {
+  text-align: center;
+  font-size: 8pt;
+  color: #64748b;
+  margin-top: -0.2cm;
+  margin-bottom: 0.4cm;
+  font-style: italic;
+}
+
+.note {
+  background: #eff6ff;
+  border-left: 4px solid #2563eb;
+  padding: 8pt 12pt;
+  margin: 0.3cm 0;
+  border-radius: 3px;
+  font-size: 9pt;
+}
+
+.tip {
+  background: #f0fdf4;
+  border-left: 4px solid #16a34a;
+  padding: 8pt 12pt;
+  margin: 0.3cm 0;
+  border-radius: 3px;
+  font-size: 9pt;
+}
+
+.warning {
+  background: #fef3c7;
+  border-left: 4px solid #d97706;
+  padding: 8pt 12pt;
+  margin: 0.3cm 0;
+  border-radius: 3px;
+  font-size: 9pt;
+}
+
+.toc {
+  page-break-after: always;
+}
+
+.toc ul {
+  list-style: none;
+  padding-left: 0;
+}
+
+.toc li {
+  padding: 3pt 0;
+  border-bottom: 1px dotted #d0d7de;
+}
+
+.toc a {
+  color: #2563eb;
+  text-decoration: none;
+}

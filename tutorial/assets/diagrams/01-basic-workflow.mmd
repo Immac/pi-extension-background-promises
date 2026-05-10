@@ -1,0 +1,13 @@
+flowchart TD
+    A["User: &quot;Run tests and review code&quot;"] --> B["Agent fires promise-create(command=&quot;npm test&quot;)"]
+    B --> C["Returns promiseId immediately"]
+    C --> D["Agent keeps working: reads files, reviews code"]
+    D --> E["🔔 Auto-delivery: test results arrive as message"]
+    E --> F["Agent continues with fresh result"]
+
+    style A fill:#e8f4f8,stroke:#2563eb
+    style B fill:#dbeafe,stroke:#2563eb
+    style C fill:#f0fdf4,stroke:#16a34a
+    style D fill:#fef3c7,stroke:#d97706
+    style E fill:#f0fdf4,stroke:#16a34a
+    style F fill:#f0fdf4,stroke:#16a34a
