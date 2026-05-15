@@ -981,7 +981,7 @@ function registerTools(pi: ExtensionAPI): void {
             content: lines.join("\n"),
             display: true,
           },
-          { triggerTurn: true, deliverAs: "followUp" }
+          { triggerTurn: false, deliverAs: "nextTurn" }
         );
       } else if (promise.status === "failed") {
         const lines = [
@@ -1000,7 +1000,7 @@ function registerTools(pi: ExtensionAPI): void {
             content: lines.join("\n"),
             display: true,
           },
-          { triggerTurn: true, deliverAs: "followUp" }
+          { triggerTurn: false, deliverAs: "nextTurn" }
         );
       } else if (promise.status === "cancelled") {
         const lines = [
@@ -1027,7 +1027,7 @@ function registerTools(pi: ExtensionAPI): void {
             content: lines.join("\n"),
             display: true,
           },
-          { triggerTurn: true, deliverAs: "followUp" }
+          { triggerTurn: false, deliverAs: "nextTurn" }
         );
       }
 
