@@ -13,7 +13,7 @@
  * Tools:
  * - promise-create: Start async task in background, returns immediately
  * - promise-then: Chain a task after an existing promise completes
- * - promise-await: Wait with smart heuristics (rarely needed)
+ * - promise-block-until-complete: Wait with smart heuristics (avoid — chains are better)
  * - promise-status: Check without blocking
  * - promises-list: List all tracked promises
  * - promise-cancel: Cancel a pending/running promise
@@ -248,7 +248,7 @@ function buildAllChainsText(): string[] {
 let _notifyCompletion: ((promise: BackgroundPromise) => void) | undefined;
 
 /**
- * Promises being explicitly awaited via promise-await.
+ * Promises being explicitly blocked on via promise-block-until-complete.
  * notifyCompletion skips these — the result already went to the LLM directly.
  */
 const _awaitedPromises = new Set<string>();
@@ -256,7 +256,7 @@ const _awaitedPromises = new Set<string>();
 function notifyCompletion(promise: BackgroundPromise): void {
   if (promise.notified) return;
   // If the LLM explicitly awaited this promise, the result was already
-  // returned directly from promise-await. Suppress the notification to
+  // returned directly from promise-block-until-complete. Suppress the notification to
   // avoid a duplicate follow-up turn.
   if (_awaitedPromises.has(promise.id)) return;
   promise.notified = true;
@@ -969,7 +969,10 @@ function registerTools(pi: ExtensionAPI): void {
           lines.push(`\u2022 Previous result included for chained promises`);
         }
         lines.push(
-          `You can use promise-await("${promise.id}") to get full structured details.`
+          `You can get full structured details with promise-block-until-complete("${promise.id}").`
+        );
+        lines.push(
+          `Tip: Instead of blocking, use promise-then(promiseId="${promise.id}", command=..., condition="on-success") to chain follow-up work automatically — the chain executes while you keep working.`
         );
 
         pi.sendMessage(
@@ -989,7 +992,7 @@ function registerTools(pi: ExtensionAPI): void {
         if (promise.result) {
           lines.push(`\u2022 Partial result: ${JSON.stringify(promise.result)}`);
         }
-        lines.push(`You may want to retry or investigate.`);
+        lines.push(`Tip: Use promise-then(promiseId="${promise.id}", command=..., condition="on-failure") to chain retry logic automatically.`);
 
         pi.sendMessage(
           {
@@ -1098,14 +1101,15 @@ function registerTools(pi: ExtensionAPI): void {
     defineTool({
       name: "promise-create",
       label: "Promise Create",
-      description: "Start an async task in background. Returns immediately with a promise ID. You can continue working on other tasks while it runs. When the promise completes, you'll be automatically notified with the result. Use promise-await for explicit blocking. Supports chaining with 'then' parameter.",
+      description: "Start an async task in background. Returns immediately with a promise ID. You can continue working on other tasks while it runs. When the promise completes, you'll be automatically notified with the result. Supports chaining with 'then' parameter. Do NOT call promise-block-until-complete after this — the result auto-delivers.",
       promptSnippet: "Start a background task and keep working — results auto-deliver",
       promptGuidelines: [
         "DEFAULT TO USING PROMISES. If a task takes more than a couple seconds, fire promise-create and keep working on other things.",
         "You get a promiseId immediately and can continue other work without blocking — edit files, read code, answer questions, start more promises.",
         "When a promise completes, a 🔔 notification message is automatically delivered. You do NOT need to poll or await.",
         "Use the 'then' parameter to chain a command that runs automatically after the first completes.",
-        "Do NOT use promise-await unless you have absolutely no other work to do. Chain follow-ups with promise-then instead.",
+        "CRITICAL — Do NOT call promise-block-until-complete after creating a promise. The result auto-delivers. If you need sequencing, use promise-then to chain.",
+        "CRITICAL — After creating a promise, do NOT run the same command/task yourself. The promise handles it completely. Trust the delegation. Results auto-deliver.",
         "CRITICAL — Do NOT duplicate the promise's work: Once you create a promise with a subject, trust it to handle that task. Do NOT start working on the same thing yourself. If you receive a promise completion notification for something you've already handled, the result is stale — just acknowledge and move on.",
         "DEDUP: Use dedup=true + subject=... to avoid creating duplicate promises. If a promise with the same subject already exists (and hasn't failed), the existing promise's ID is returned instead of creating a new one.",
         "REPLACE: Use replace=true + subject=... to cancel an existing promise with the same subject and create a fresh one. This is the pattern for 're-run tests after code changes'.",
@@ -1131,7 +1135,7 @@ function registerTools(pi: ExtensionAPI): void {
         subject?: string;
         dedup?: boolean;
         replace?: boolean;
-      }) {
+      }, _signal?: AbortSignal): Promise<any> {
         // ---- Dedup / Replace: Check for existing promise with same subject ----
         if (args.subject) {
           if (args.replace) {
@@ -1174,8 +1178,9 @@ function registerTools(pi: ExtensionAPI): void {
             if (existing && existing.status !== "failed" && existing.status !== "cancelled") {
               const statusDesc = existing.status === "completed" ? "already completed" : `currently ${existing.status}`;
               const text = `Dedup: promise with subject "${args.subject}" ${statusDesc} — returning existing ${existing.id}`;
+              const guard = `⚠️ Do NOT run this task yourself — promise ${existing.id} already handles it. Use promise-then to chain follow-up work.`;
               return {
-                content: [{ type: "text", text }],
+                content: [{ type: "text", text: `${text}\n\n${guard}` }],
                 details: {
                   promiseId: existing.id,
                   name: existing.name,
@@ -1193,6 +1198,14 @@ function registerTools(pi: ExtensionAPI): void {
               };
             }
           }
+        }
+
+        if (_signal?.aborted) {
+          return {
+            content: [{ type: "text", text: "Promise creation aborted by caller" }],
+            details: { promiseId: "", name: "", subject: "", type: "command", status: "cancelled", dedup: false, replace: false, existingResult: undefined, previousResult: undefined, willChain: false, thenCondition: undefined, error: "Aborted" },
+            isError: true
+          };
         }
 
         const isDownload = !!args.download;
@@ -1253,10 +1266,14 @@ function registerTools(pi: ExtensionAPI): void {
         const replaceInfo = args.replace
           ? " — replaced previous run"
           : "";
+        const commandDisplay = promise.command?.slice(0, 100) ?? promise.url ?? "";
         const text = `Started ${promise.type}: ${promise.id}${subjectInfo}${chainInfo}${replaceInfo}`;
+        const guard = commandDisplay
+          ? `⚠️ Do NOT run this command yourself — the promise handles it: ${commandDisplay}`
+          : `⚠️ Do NOT run this task yourself — promise ${promise.id} handles it.`;
 
         return {
-          content: [{ type: "text", text }],
+          content: [{ type: "text", text: `${text}\n\n${guard}` }],
           details: {
             promiseId: promise.id,
             name: promise.name,
@@ -1277,19 +1294,19 @@ function registerTools(pi: ExtensionAPI): void {
   );
 
   // ---------------------------------------------------------------------
-  // promise-await: Wait for promise with smart heuristics
+  // promise-block-until-complete: Block until done (last resort — prefer promise-then)
   // ---------------------------------------------------------------------
   pi.registerTool(
     defineTool({
-      name: "promise-await",
-      label: "Promise Await",
-      description: "Wait for a background promise to complete. Returns result for agent use. Uses smart heuristics for downloads (growth detection) or simple await for commands.",
-      promptSnippet: "Block until a background promise completes (last resort — results auto-deliver)",
+      name: "promise-block-until-complete",
+      label: "Promise Block Until Complete",
+      description: "⚠️ LAST RESORT — Block until a background promise completes. PREFER promise-then(promiseId, command=...) instead which chains work without blocking. This tool should only be used when you have absolutely no other work to do and the result is blocking. Results auto-deliver — you generally don't need this.",
+      promptSnippet: "⚠️ Block until a background promise completes (last resort — auto-delivery preferred)",
       promptGuidelines: [
-        "You generally do NOT need to call promise-await. Results auto-deliver as messages.",
-        "Before using promise-await, ask yourself: can I work on something else? If yes, do that instead. The result will arrive.",
-        "Only use promise-await when you have literally no other work to do and the result is blocking — or to get full structured details (details field).",
-        "If you need to chain work after a promise, use promise-then(promiseId, command) instead of awaiting.",
+        "⚠️ Do NOT call this tool unless you have absolutely no other work to do.",
+        "Results auto-deliver as messages — trust auto-delivery instead of blocking.",
+        "If you need to chain work after a promise, use promise-then(promiseId, command) instead.",
+        "This tool blocks your progress — promise-then keeps you working.",
       ],
       parameters: Type.Object({
         promiseId: Type.String({ description: "ID returned by promise-create" }),
@@ -1300,7 +1317,7 @@ function registerTools(pi: ExtensionAPI): void {
         promiseId: string;
         stallTimeout?: number;
         doneGracePeriod?: number;
-      }) {
+      }, _signal?: AbortSignal) {
         const promise = getPromise(args.promiseId);
 
         if (!promise) {
@@ -1311,7 +1328,7 @@ function registerTools(pi: ExtensionAPI): void {
           };
         }
 
-        // Mark as explicitly awaited BEFORE returning — notifyCompletion
+        // Mark as explicitly blocked BEFORE returning — notifyCompletion
         // checks this set and suppresses the auto-notification to avoid
         // a duplicate follow-up turn when the LLM already has the result.
         _awaitedPromises.add(args.promiseId);
@@ -1319,7 +1336,9 @@ function registerTools(pi: ExtensionAPI): void {
         if (promise.status === "completed") {
           // Include result in details for agent use
           return { 
-            content: [{ type: "text", text: `Promise completed` }], 
+            content: [{ type: "text", text: `Promise completed
+
+Tip: Instead of blocking here, you could have used promise-then(promiseId="${promise.id}", command=..., condition="on-success") to chain follow-up work automatically. The chain executes while you keep working.` }], 
             details: { 
               success: true, 
               result: promise.result,
@@ -1347,12 +1366,27 @@ function registerTools(pi: ExtensionAPI): void {
           };
         }
 
+        if (_signal?.aborted) {
+          return {
+            content: [{ type: "text", text: "Aborted by caller" }],
+            details: { success: false, error: "Aborted", result: undefined, previousResult: undefined },
+            isError: true
+          };
+        }
+
         if (promise.type === "download") {
           return await waitForDownload(promise, args);
         }
 
         // For commands, simple poll with result passthrough
         while (getPromise(args.promiseId)?.status === "running") {
+          if (_signal?.aborted) {
+            return {
+              content: [{ type: "text", text: "Aborted by caller" }],
+              details: { success: false, error: "Aborted", result: undefined, previousResult: undefined },
+              isError: true
+            };
+          }
           await new Promise((resolve) => setTimeout(resolve, 500));
         }
         
@@ -1850,7 +1884,8 @@ function registerTools(pi: ExtensionAPI): void {
         "Multiple promise-then calls on the same promise create a sequential chain (each appends at the end).",
         "Use condition='on-success' or condition='on-failure' to control when the chain runs.",
         "If the target promise is already completed, the chained task runs immediately (subject to condition).",
-        "Use promise-then instead of promise-await whenever possible. Let the chain handle sequencing while you work on other things.",
+        "Use promise-then instead of promise-block-until-complete whenever possible. Let the chain handle sequencing while you work on other things.",
+        "After chaining, run promise-graph(promiseId=...) to inspect the chain structure and verify it's what you intended.",
       ],
       parameters: Type.Object({
         promiseId: Type.String({ description: "ID of an existing promise (from promise-create)" }),

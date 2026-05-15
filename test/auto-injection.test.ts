@@ -98,7 +98,7 @@ async function main() {
 
   // Retrieve tools
   const createTool = pi.tools.find((t) => t.name === "promise-create");
-  const awaitTool = pi.tools.find((t) => t.name === "promise-await");
+  const awaitTool = pi.tools.find((t) => t.name === "promise-block-until-complete");
   const listTool = pi.tools.find((t) => t.name === "promises-list");
   const statusTool = pi.tools.find((t) => t.name === "promise-status");
   const cancelTool = pi.tools.find((t) => t.name === "promise-cancel");
@@ -161,18 +161,18 @@ async function main() {
     throw new Error("Auto-injection not triggered");
   }
 
-  // ---- Test 2: promise-await on completed promise returns result ----
+  // ---- Test 2: promise-block-until-complete on completed promise returns result ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 2: promise-await on completed promise");
+  console.log("Test 2: promise-block-until-complete on completed promise");
   console.log("═══════════════════════════════════════════\n");
 
   const awaitResult = await awaitTool.execute("call-2", { promiseId });
   
   if (awaitResult.details?.success) {
-    console.log("✅ promise-await returns success:", JSON.stringify(awaitResult.details.result));
+    console.log("✅ promise-block-until-complete returns success:", JSON.stringify(awaitResult.details.result));
   } else {
-    console.log("❌ promise-await failed:", JSON.stringify(awaitResult));
-    throw new Error("promise-await failed");
+    console.log("❌ promise-block-until-complete failed:", JSON.stringify(awaitResult));
+    throw new Error("promise-block-until-complete failed");
   }
   console.log("");
 
@@ -675,12 +675,12 @@ async function main() {
         console.log("✅ previousResult present on child");
         console.log("  contains output:", !!(childStatus.details.previousResult as any)?.output);
       } else {
-        console.log("⚠️ previousResult may not be visible via status — checking via await...");
-        // Try via promise-await on the child
+        console.log("⚠️ previousResult may not be visible via status — checking via block...");
+        // Try via promise-block-until-complete on the child
         const childAwait = await awaitTool.execute("call-32", { promiseId: childId });
-        console.log("  await details:", JSON.stringify(childAwait.details));
+        console.log("  block details:", JSON.stringify(childAwait.details));
         if (childAwait.details?.previousResult) {
-          console.log("✅ previousResult found via promise-await");
+          console.log("✅ previousResult found via promise-block-until-complete");
         } else {
           console.log("⚠️ previousResult not set (may not be available for pre-created children)");
         }

@@ -42,7 +42,7 @@ Agent: "Download complete. Here's my review of train.py..."
 | `promise-then` | Chain a command or download **after** any existing promise. Multiple calls create a sequence. Supports `condition`: `always` (default), `on-success`, `on-failure`. Returns full chain visualization. |
 | `promise-graph` | Inspect chain relationships — tree view for a specific promise or all chains. |
 | `promise-rechain` | Re-attach a cancelled/failed promise's command to a different parent chain. |
-| `promise-await` | Block until a promise completes (rarely needed — results auto-deliver). Has smart download stall detection. |
+| `promise-block-until-complete` | ⚠️ Block until a promise completes (last resort — results auto-deliver). Has smart download stall detection. Prefer promise-then for chaining. |
 | `promise-status` | Check status without blocking. Returns last known result. |
 | `promises-list` | List all tracked promises as a chain tree showing parent-child relationships. |
 | `promise-cancel` | Cancel a pending or running promise (kills child process). |
@@ -59,8 +59,8 @@ Agent: "Download complete. Here's my review of train.py..."
 | Installing packages, building | ✅ Yes — start, then continue reviewing |
 | Reading a file | ❌ No — too fast, just read directly |
 | Quick git operations | ❌ No — just run them inline |
-| You need the result to continue | ⚠️ Use `promise-then` to chain instead of `promise-await` |
-| You must block (interactive auth, user input) | ⚠️ Use `promise-await` as last resort |
+| You need the result to continue | ⚠️ Use `promise-then` to chain instead of `promise-block-until-complete` |
+| You must block (interactive auth, user input) | ⚠️ Use `promise-block-until-complete` as last resort |
 
 **Default to using promises.** If a task takes more than a few seconds, fire it and move on. The auto-delivery pattern means you never forget about it — the result will arrive when ready.
 
@@ -77,7 +77,9 @@ All promises (root and chained) auto-deliver results:
 • Type: command
 • Status: completed
 • Result: { "output": "Epoch 50/50 — loss: 0.023" }
-You can use promise-await("promise-xxx") for full structured details.
+You can get full structured details with promise-block-until-complete("promise-xxx").
+
+**Tip:** Instead of blocking, use `promise-then(promiseId=..., command=...)` to chain follow-up work automatically without blocking.
 ```
 
 Failed promises also notify — you can chain a fallback with `condition="on-failure"`.
@@ -267,7 +269,7 @@ Press F4 to collapse
 
 ### Smart Await Heuristics
 
-`promise-await` is rarely needed but smart when used:
+`promise-block-until-complete` is rarely needed but smart when used:
 - **Downloads**: File-growth detection — polls file size, times out only after no progress for N seconds, considers done after a grace period
 - **Commands**: Polls for process exit, returns stdout/stderr
 

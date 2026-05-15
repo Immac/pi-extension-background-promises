@@ -15,7 +15,7 @@ description: Run background tasks without blocking — fire promises, keep worki
 | Task takes >2 seconds and you have other work | ✅ `promise-create(subject=..., ...)` → **keep working on DIFFERENT tasks** |
 | You need to do something after a task finishes | ✅ `promise-then(promiseId=..., command=...)` |
 | You absolutely need the result to continue | ✅ `promise-then(promiseId=..., command=...)` — still don't block |
-| You must block (no other work possible) | ⚠️ `promise-await(promiseId=...)` — last resort |
+| You must block (no other work possible) | ⚠️ `promise-block-until-complete(promiseId=...)` — last resort |
 
 **Do not wait if you can work — but work on DIFFERENT things.** Every time you use `promise-create`, you give yourself the ability to answer more of the user's questions, review more code, or chain next steps — all while the task runs. Use `subject` to label what the promise handles, and do NOT start working on that same task yourself.
 
@@ -208,7 +208,10 @@ Press F4 to collapse
 
 ## ⚠️ Avoiding Duplicate Work (Common Pitfall)
 
-**The #1 mistake:** Firing a promise for task X, then starting to work on task X yourself while the promise runs. The promise notification then arrives with stale results.
+**The mistake:** Firing a promise for task X, then immediately ALSO running that same command/task yourself. This wastes work, produces stale results, and confuses the flow.
+
+**Why this happens:** The `promise-create` tool returns "Started command: promise-123" which looks like just an ID — it doesn't 
+explicitly say "do not touch this task." The agent then thinks "I should also start this in case the promise doesn't work." **This is wrong.**
 
 ```
 ❌ BAD:
@@ -224,12 +227,30 @@ Press F4 to collapse
   → Now install marked based on the fresh result.
 ```
 
-### How to avoid it
+### Strict Rules — Follow Every Time
 
-1. **Use `subject`:** Always add `subject="what this is checking"` when creating a promise. This labels the promise's scope so you can check for overlaps via `promises-list`.
-2. **Check before acting:** If you're about to work on something, call `promises-list()` first and check if any active promise's `subject` covers the same task.
-3. **Trust the delegation:** Once you fire a promise, **do not** start working on the same task. The promise handles it. Work on something else.
-4. **Stale notifications:** If a promise notification arrives for something you already handled, the result is stale. Acknowledge and move on — no need to redo work.
+**Rule 1 — Read the promise-create result carefully.** It now includes an explicit ⚠️ warning telling you what NOT to do. If you see:
+```
+⚠️ Do NOT run this command yourself — the promise handles it: kubectl get pods
+```
+**Believe it.** Do NOT run `kubectl get pods` yourself.
+
+**Rule 2 — After creating a promise, do NOT do the same work.** 
+- If the promise runs `npm test` — do NOT also run `npm test` via bash.
+- If the promise downloads a file — do NOT also `curl` it.
+- If the promise saves to KB — do NOT also call `kb_save_skill`.
+
+**Rule 3 — Work on DIFFERENT things instead.**
+- Promise runs test suite → you review code, read docs, answer user questions.
+- Promise downloads data → you check data schema, review training script.
+- Promise processes files → you check config, plan next steps.
+
+**Rule 4 — Use `promise-then` to sequence, not `promise-block-until-complete`.**
+- Want to process data after download? `promise-then(promiseId, command=...)`
+- Want to alert on failure? `promise-then(promiseId, command=..., condition="on-failure")`
+- Never block. Never duplicate. Trust the chain.
+
+**Rule 5 — Stale notifications.** If a promise notification arrives for work you already duplicated, the result is stale. Acknowledge and move on.
 
 ### Decision table
 
@@ -238,7 +259,7 @@ Press F4 to collapse
 | Promise `subject` covers task X | Do NOT work on X. Work on Y instead. |
 | No promise covers task X | Safe to work on X directly |
 | Promise notification for already-done work | Result is stale — skip it |
-| Unsure what promises exist | Call `promises-list()` — check `subject` fields |
+| Unsure what promises exist | Call `promise-graph()` or `promises-list()` — check `subject` fields |
 
 ### 🎯 Dedup and Replace — Programmatic Duplicate Prevention
 
@@ -348,7 +369,7 @@ Subjects are case-sensitive and must match exactly for dedup/replace to work.
 - **Reading small files** — just use `read()`
 - **Quick git operations** — just run inline
 - **User interaction** (auth prompts, confirmations) — must block
-- **The result is needed before any other work is possible** — rare, use `promise-await`
+- **The result is needed before any other work is possible** — rare, use `promise-block-until-complete`
 
 Otherwise: **fire a promise.**
 
@@ -431,7 +452,7 @@ No orphaned processes remain after pi closes.
 - `promise-then` — chain a task after an existing promise
 - `promise-rechain` — re-attach a cancelled/failed promise to a different parent
 - `promise-graph` — inspect chain relationships (tree view for one or all chains)
-- `promise-await` — block until done (rarely needed)
+- `promise-block-until-complete` — ⚠️ block until done (last resort — use promise-then instead)
 - `promise-status` — non-blocking check
 - `promises-list` — list all promises as a chain tree
 - `promise-cancel` — cancel a running task

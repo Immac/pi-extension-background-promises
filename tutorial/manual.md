@@ -30,7 +30,7 @@ Version 1.0.0 — May 2026
 - [4. Tools Reference](#4-tools-reference)
   - [4.1 promise-create](#41-promise-create)
   - [4.2 promise-then](#42-promise-then)
-  - [4.3 promise-await](#43-promise-await)
+  - [4.3 promise-block-until-complete](#43-promise-block-until-complete)
   - [4.4 promise-status](#44-promise-status)
   - [4.5 promises-list](#45-promises-list)
   - [4.6 promise-graph](#46-promise-graph)
@@ -237,12 +237,12 @@ Path: preprocess (✓ completed) → train (✓ completed) → eval (○ pending
 
 <div class="tip">**Why chain after the fact**: You don't need to plan the full pipeline upfront. Start step 1, work on other things, and chain step 2 when you figure out what it should be. The chain auto-executes.</div>
 
-## 4.3 promise-await
+## 4.3 promise-block-until-complete
 
-**Block until a promise completes.** Rarely needed — results auto-deliver. Use only when you have no other work to do and need the structured result.
+**⚠️ Block until a promise completes.** Last resort — results auto-deliver. Prefer `promise-then` for sequencing.
 
 ```
-promise-await(
+promise-block-until-complete(
   promiseId: "promise-123",
   stallTimeout?: 60,              // Seconds of no progress before timeout (downloads only)
   doneGracePeriod?: 5             // Seconds of no growth before considered done (downloads only)
@@ -614,7 +614,7 @@ npm test
 | # | Test | What it covers |
 |---|------|---------------|
 | 1 | Background command → auto-injection | Basic completion notification |
-| 2 | promise-await on completed promise | Result retrieval after completion |
+| 2 | promise-block-until-complete on completed promise | Result retrieval after completion |
 | 3 | promises-list | Chain tree display |
 | 4 | Failed command → auto-injection | Error notification format |
 | 5 | promise-cancel on running promise | Cancellation kills process |
@@ -635,7 +635,7 @@ SUMMARY
 
 Total sentMessages (promise-completion): 23
 Total sentMessages (all): 23
-Tools tested: promise-create, promise-await, promise-status,
+Tools tested: promise-create, promise-block-until-complete, promise-status,
               promises-list, promise-graph, promise-rechain,
               promise-cancel, promise-then
 
@@ -651,8 +651,8 @@ npm run validate
 
 # 11. FAQ
 
-**Q: When should I use promise-await instead of promise-then?**
-A: Almost never. `promise-await` blocks — you can't do other work while waiting. Use `promise-then` to chain, which lets you keep working while the chain executes. Only use `promise-await` when you absolutely must have the result to continue and have no other work to do.
+**Q: When should I use promise-block-until-complete instead of promise-then?**
+A: Almost never. `promise-block-until-complete` blocks — you can't do other work while waiting. Use `promise-then` to chain, which lets you keep working while the chain executes. Only use `promise-block-until-complete` when you absolutely must have the result to continue and have no other work to do.
 
 **Q: What happens if I call promise-then on a cancelled promise?**
 A: The tool returns an error: "Cannot chain to cancelled promise". Use `promise-rechain` to retry the cancelled step on a different parent.
@@ -670,7 +670,7 @@ A: All running/pending promises are cancelled with reason "pi exited — session
 A: Pre-created children are created immediately when `promise-create` is called with a `then` parameter. They exist as concrete promise objects with status `pending`. This eliminates the race condition where `promise-then` could overwrite the parent's `thenCommand` before the child is materialized.
 
 **Q: Do downloads show progress?**
-A: Yes — the status bar shows percentage and downloaded size for downloads with known Content-Length. The `promise-await` tool uses smart stall detection for downloads.
+A: Yes — the status bar shows percentage and downloaded size for downloads with known Content-Length. The `promise-block-until-complete` tool uses smart stall detection for downloads.
 
 **Q: Is there a limit on chain length?**
 A: No — chains can be arbitrarily long. Each `promise-then` appends to the terminal. However, very long chains should be broken into logical segments for manageability.
