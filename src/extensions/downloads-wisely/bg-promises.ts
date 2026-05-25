@@ -27,8 +27,10 @@
  * - Results flow through to agent context
  */
 
-import { spawn } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { spawn, execSync } from "node:child_process";
+import { createWriteStream, writeFileSync, unlinkSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -728,71 +730,18 @@ async function runDownload(promise: BackgroundPromise): Promise<void> {
 // Command Runner
 // =============================================================================
 
-async function runCommand(promise: BackgroundPromise): Promise<void> {
-  if (!promise.command) {
-    promise.status = "failed";
-    promise.error = "Missing command";
-    promise.completedAt = Date.now();
-    setPromise(promise);
-    await runChainedPromise(promise);
-    return;
+/**
+ * Run a command promise. Dispatches to tmux if available, otherwise uses
+ * direct spawn-based execution.
+ */
+function runCommand(promise: BackgroundPromise): void {
+  if (_isTmuxAvailable()) {
+    _runInTmux(promise);
+  } else {
+    _runDirect(promise);
   }
-
-  try {
-    promise.status = "running";
-    setPromise(promise);
-
-    const proc = spawn("sh", ["-c", promise.command]);
-    promise.childPid = proc.pid;
-    setPromise(promise);
-
-    let output = "";
-
-    proc.stdout?.on("data", (data: Buffer) => {
-      output += data.toString();
-    });
-
-    proc.stderr?.on("data", (data: Buffer) => {
-      output += data.toString();
-    });
-
-    await new Promise<void>((resolve) => {
-      proc.on("close", (code: number | null) => {
-        // Don't overwrite if already cancelled (e.g., by promise-cancel)
-        if (promise.status !== "cancelled") {
-          if (code === 0) {
-            promise.status = "completed";
-            promise.result = { output: output.trim() };
-          } else {
-            promise.status = "failed";
-            promise.error = `Command exited with code ${code}`;
-            promise.result = { output: output.trim() };
-          }
-        }
-        promise.completedAt = Date.now();
-        setPromise(promise);
-        resolve();
-      });
-      
-      proc.on("error", (err: Error) => {
-        if (promise.status !== "cancelled") {
-          promise.status = "failed";
-          promise.error = err.message;
-        }
-        promise.completedAt = Date.now();
-        setPromise(promise);
-        resolve();
-      });
-    });
-  } catch (err) {
-    promise.status = "failed";
-    promise.error = err instanceof Error ? err.message : String(err);
-    promise.completedAt = Date.now();
-    setPromise(promise);
-  }
-
-  await runChainedPromise(promise);
 }
+
 
 // =============================================================================
 // Chained Promise Runner
@@ -903,6 +852,215 @@ async function runChainedPromise(promise: BackgroundPromise): Promise<void> {
 }
 
 // =============================================================================
+// Tmux Integration
+// =============================================================================
+
+/** Cached tmux availability check */
+let _tmuxChecked = false;
+let _tmuxAvailable = false;
+
+/** Track tmux session names by promise ID for cleanup */
+const _tmuxSessions = new Map<string, string>();
+
+/**
+ * Check if we're inside a tmux session and tmux binary is available.
+ */
+function _isTmuxAvailable(): boolean {
+  if (_tmuxChecked) return _tmuxAvailable;
+  _tmuxChecked = true;
+  try {
+    execSync("tmux -V", { stdio: "ignore" });
+    _tmuxAvailable = !!process.env.TMUX;
+  } catch {
+    _tmuxAvailable = false;
+  }
+  return _tmuxAvailable;
+}
+
+/**
+ * Sanitize a string for use as a tmux session name — alphanumeric + hyphens only.
+ */
+function _toTmuxName(promise: BackgroundPromise): string {
+  return "promise-" + promise.id.replace(/[^a-zA-Z0-9\-]/g, "-").slice(0, 64);
+}
+
+/**
+ * Kill a tmux session by promise ID. Called on cancel/shutdown.
+ */
+function _killTmuxSession(promiseId: string): void {
+  const sessionName = _tmuxSessions.get(promiseId);
+  if (!sessionName) return;
+  try {
+    execSync(`tmux kill-session -t "${sessionName}" 2>/dev/null`, { stdio: "ignore" });
+  } catch {
+    // Session may already be dead
+  }
+  _tmuxSessions.delete(promiseId);
+  // Clean up temp files
+  const outFile = `/tmp/promise-${promiseId}.out`;
+  const scriptFile = `/tmp/promise-${promiseId}.sh`;
+  try { unlinkSync(outFile); } catch {}
+  try { unlinkSync(scriptFile); } catch {}
+}
+
+/**
+ * Read captured output from the tmp file. Returns trimmed string or empty.
+ */
+function _readTmuxOutput(promiseId: string): string {
+  const outFile = `/tmp/promise-${promiseId}.out`;
+  try {
+    if (!existsSync(outFile)) return "";
+    let content = readFileSync(outFile, "utf-8");
+    // Strip the completion marker if present
+    const markerIdx = content.lastIndexOf("\n---PROMISE-DONE---\n");
+    if (markerIdx >= 0) content = content.slice(0, markerIdx);
+    return content.trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Run a command in a new tmux session. Writes a temp script to avoid
+ * shell-escaping nightmares, pipes output through tee to a capture file.
+ * The session stays open (exec bash) so the user can attach and inspect.
+ */
+function _runInTmux(promise: BackgroundPromise): void {
+  if (!promise.command) {
+    _runDirect(promise);
+    return;
+  }
+
+  const sessionName = _toTmuxName(promise);
+  const outFile = `/tmp/promise-${promise.id}.out`;
+  const scriptFile = `/tmp/promise-${promise.id}.sh`;
+  _tmuxSessions.set(promise.id, sessionName);
+
+  // Write a temp script that runs the command, tees output, and stays open
+  const script = `#!/bin/bash
+${promise.command} 2>&1 | tee "${outFile}"
+echo "---PROMISE-DONE---" >> "${outFile}"
+echo ""
+echo "┌──────────────────────────────────────────────────┐"
+echo "│  Promise complete — you can close this pane.     │"
+echo "└──────────────────────────────────────────────────┘"
+exec bash
+`;
+  writeFileSync(scriptFile, script, "utf-8");
+  try { execSync(`chmod +x "${scriptFile}"`, { stdio: "ignore" }); } catch {}
+
+  // Launch in a detached tmux session
+  try {
+    execSync(`tmux new-session -d -s "${sessionName}" "bash ${scriptFile}" 2>/dev/null`, { stdio: "ignore" });
+    promise.status = "running";
+    promise.childPid = undefined; // tmux manages the process
+    setPromise(promise);
+
+    // Poll the output file for the completion marker
+    const pollInterval = setInterval(() => {
+      const current = getPromise(promise.id);
+      if (!current || current.status === "cancelled") {
+        clearInterval(pollInterval);
+        return;
+      }
+
+      try {
+        if (existsSync(outFile)) {
+          const content = readFileSync(outFile, "utf-8");
+          if (content.includes("\n---PROMISE-DONE---\n")) {
+            clearInterval(pollInterval);
+            promise.status = "completed";
+            promise.result = { output: _readTmuxOutput(promise.id) };
+            promise.completedAt = Date.now();
+            setPromise(promise);
+            _updateStatusBar();
+            runChainedPromise(promise);
+          }
+        }
+      } catch {
+        // File may be temporarily locked
+      }
+    }, 500);
+
+    _updateStatusBar();
+  } catch (err) {
+    // tmux failed — fall back to direct execution
+    _tmuxSessions.delete(promise.id);
+    try { unlinkSync(scriptFile); } catch {}
+    _runDirect(promise);
+  }
+}
+
+/**
+ * Direct spawn-based execution (original behavior, no tmux).
+ */
+function _runDirect(promise: BackgroundPromise): void {
+  if (!promise.command) {
+    promise.status = "failed";
+    promise.error = "Missing command";
+    promise.completedAt = Date.now();
+    setPromise(promise);
+    runChainedPromise(promise);
+    return;
+  }
+
+  try {
+    promise.status = "running";
+    setPromise(promise);
+
+    const proc = spawn("sh", ["-c", promise.command]);
+    promise.childPid = proc.pid;
+    setPromise(promise);
+
+    let output = "";
+
+    proc.stdout?.on("data", (data: Buffer) => {
+      output += data.toString();
+    });
+
+    proc.stderr?.on("data", (data: Buffer) => {
+      output += data.toString();
+    });
+
+    new Promise<void>((resolve) => {
+      proc.on("close", (code: number | null) => {
+        if (promise.status !== "cancelled") {
+          if (code === 0) {
+            promise.status = "completed";
+            promise.result = { output: output.trim() };
+          } else {
+            promise.status = "failed";
+            promise.error = `Command exited with code ${code}`;
+            promise.result = { output: output.trim() };
+          }
+        }
+        promise.completedAt = Date.now();
+        setPromise(promise);
+        resolve();
+      });
+
+      proc.on("error", (err: Error) => {
+        if (promise.status !== "cancelled") {
+          promise.status = "failed";
+          promise.error = err.message;
+        }
+        promise.completedAt = Date.now();
+        setPromise(promise);
+        resolve();
+      });
+    }).then(() => {
+      runChainedPromise(promise);
+    });
+  } catch (err) {
+    promise.status = "failed";
+    promise.error = err instanceof Error ? err.message : String(err);
+    promise.completedAt = Date.now();
+    setPromise(promise);
+    runChainedPromise(promise);
+  }
+}
+
+// =============================================================================
 // Shutdown Cleanup — cancel all promises when pi exits
 // =============================================================================
 
@@ -931,6 +1089,8 @@ function cancelAllPromises(): void {
         clearInterval(timer);
         _progressTimers.delete(promise.id);
       }
+      // Kill tmux session if running in one
+      _killTmuxSession(promise.id);
       // Mark as cancelled
       promise.status = "cancelled";
       promise.error = "pi exited — session ended";
@@ -1140,6 +1300,7 @@ function registerTools(pi: ExtensionAPI): void {
               if (existingDownloadAc) { existingDownloadAc.abort(); _downloadControllers.delete(existing.id); }
               const timer = _progressTimers.get(existing.id);
               if (timer) { clearInterval(timer); _progressTimers.delete(existing.id); }
+              _killTmuxSession(existing.id);
               // Cascade cancellation to children
               let current = existing;
               while (current.thenPromiseId) {
@@ -1154,6 +1315,7 @@ function registerTools(pi: ExtensionAPI): void {
                 if (childDownloadAc) { childDownloadAc.abort(); _downloadControllers.delete(child.id); }
                 const childTimer = _progressTimers.get(child.id);
                 if (childTimer) { clearInterval(childTimer); _progressTimers.delete(child.id); }
+                _killTmuxSession(child.id);
                 setPromise(child);
                 current = child;
               }
@@ -1818,6 +1980,8 @@ Tip: Instead of blocking here, you could have used promise-then(promiseId="${pro
           clearInterval(timer);
           _progressTimers.delete(promise.id);
         }
+        // Kill tmux session if running in one
+        _killTmuxSession(promise.id);
         setPromise(promise);
 
         // Cascade cancellation to all children in the chain
@@ -1839,6 +2003,7 @@ Tip: Instead of blocking here, you could have used promise-then(promiseId="${pro
             clearInterval(childTimer);
             _progressTimers.delete(child.id);
           }
+          _killTmuxSession(child.id);
           setPromise(child);
           current = child;
         }
