@@ -30,8 +30,8 @@
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 
-import { Type } from "@mariozechner/pi-ai";
-import { defineTool, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "typebox";
+import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // =============================================================================
 // Types

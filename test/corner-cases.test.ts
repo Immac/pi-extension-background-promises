@@ -80,7 +80,7 @@ async function main() {
   extModule.default(pi as any);
 
   const createTool = pi.tools.find((t) => t.name === "promise-create")!;
-  const awaitTool = pi.tools.find((t) => t.name === "promise-await")!;
+  const awaitTool = pi.tools.find((t) => t.name === "promise-block-until-complete")!;
   const listTool = pi.tools.find((t) => t.name === "promises-list")!;
   const statusTool = pi.tools.find((t) => t.name === "promise-status")!;
   const cancelTool = pi.tools.find((t) => t.name === "promise-cancel")!;

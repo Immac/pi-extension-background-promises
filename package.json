@@ -20,8 +20,11 @@
     "test": "npx tsx test/auto-injection.test.ts"
   },
   "peerDependencies": {
-    "@mariozechner/pi-ai": "^0.73.0",
-    "@mariozechner/pi-coding-agent": "^0.73.0"
+    "@earendil-works/pi-coding-agent": "0.75.5"
+  },
+  "dependencies": {
+    "@types/node": "^25.6.0",
+    "typebox": "1.1.38"
   },
   "devDependencies": {
     "typescript": "^5.0.0"
@@ -33,8 +36,5 @@
     "skills": [
       "./skills"
     ]
-  },
-  "dependencies": {
-    "@types/node": "^25.6.0"
   }
 }
