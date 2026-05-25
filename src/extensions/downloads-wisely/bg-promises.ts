@@ -1097,6 +1097,7 @@ function registerTools(pi: ExtensionAPI): void {
         "When a promise completes, a 🔔 notification message is automatically delivered. You do NOT need to poll or await.",
         "Use the 'then' parameter to chain a command that runs automatically after the first completes.",
         "After creating a promise, work on DIFFERENT things — don't start the same work manually. The promise handles its task.",
+        "If you have nothing else to do while a promise runs, it's fine to stop — the promise notification will wake you up when the result is ready.",
         "When a promise completion notification arrives, the result is ready to use. Act on it naturally — inspect the output, chain next steps, or report to the user.",
         "DEDUP: Use dedup=true + subject=... to avoid creating duplicate promises. If a promise with the same subject already exists (and hasn't failed), the existing promise's ID is returned instead of creating a new one.",
         "REPLACE: Use replace=true + subject=... to cancel an existing promise with the same subject and create a fresh one. This is the pattern for 're-run tests after code changes'.",
