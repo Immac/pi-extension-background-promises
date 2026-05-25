@@ -956,24 +956,14 @@ function registerTools(pi: ExtensionAPI): void {
         const lines = [
           `\u{1F514} Promise "${promise.name}" completed!`,
           `\u2022 Type: ${promise.type}`,
-          `\u2022 Status: completed`,
         ];
         if (promise.result) {
           const resultStr =
             typeof promise.result === "object"
               ? JSON.stringify(promise.result, null, 2)
               : String(promise.result);
-          lines.push(`\u2022 Result: ${resultStr}`);
+          lines.push(`Result: ${resultStr}`);
         }
-        if (promise.previousResult) {
-          lines.push(`\u2022 Previous result included for chained promises`);
-        }
-        lines.push(
-          `You can get full structured details with promise-block-until-complete("${promise.id}").`
-        );
-        lines.push(
-          `Tip: Instead of blocking, use promise-then(promiseId="${promise.id}", command=..., condition="on-success") to chain follow-up work automatically — the chain executes while you keep working.`
-        );
 
         pi.sendMessage(
           {
@@ -990,9 +980,8 @@ function registerTools(pi: ExtensionAPI): void {
           `\u2022 Error: ${promise.error ?? "Unknown error"}`,
         ];
         if (promise.result) {
-          lines.push(`\u2022 Partial result: ${JSON.stringify(promise.result)}`);
+          lines.push(`Partial result: ${JSON.stringify(promise.result)}`);
         }
-        lines.push(`Tip: Use promise-then(promiseId="${promise.id}", command=..., condition="on-failure") to chain retry logic automatically.`);
 
         pi.sendMessage(
           {
@@ -1014,12 +1003,11 @@ function registerTools(pi: ExtensionAPI): void {
             const parentId = p.id;
             const parent = promises.get(parentId);
             if (parent) {
-              lines.push(`\u2022 Parent "${parent.name}" (${parent.id}) status: ${parent.status}`);
+              lines.push(`Parent "${parent.name}" (${parent.id}) status: ${parent.status}`);
             }
             break;
           }
         }
-        lines.push(`You can use promise-rechain to retry this step on a different parent.`);
 
         pi.sendMessage(
           {
@@ -1108,9 +1096,8 @@ function registerTools(pi: ExtensionAPI): void {
         "You get a promiseId immediately and can continue other work without blocking — edit files, read code, answer questions, start more promises.",
         "When a promise completes, a 🔔 notification message is automatically delivered. You do NOT need to poll or await.",
         "Use the 'then' parameter to chain a command that runs automatically after the first completes.",
-        "CRITICAL — Do NOT call promise-block-until-complete after creating a promise. The result auto-delivers. If you need sequencing, use promise-then to chain.",
-        "CRITICAL — After creating a promise, do NOT run the same command/task yourself. The promise handles it completely. Trust the delegation. Results auto-deliver.",
-        "CRITICAL — Do NOT duplicate the promise's work: Once you create a promise with a subject, trust it to handle that task. Do NOT start working on the same thing yourself. If you receive a promise completion notification for something you've already handled, the result is stale — just acknowledge and move on.",
+        "After creating a promise, work on DIFFERENT things — don't start the same work manually. The promise handles its task.",
+        "When a promise completion notification arrives, the result is ready to use. Act on it naturally — inspect the output, chain next steps, or report to the user.",
         "DEDUP: Use dedup=true + subject=... to avoid creating duplicate promises. If a promise with the same subject already exists (and hasn't failed), the existing promise's ID is returned instead of creating a new one.",
         "REPLACE: Use replace=true + subject=... to cancel an existing promise with the same subject and create a fresh one. This is the pattern for 're-run tests after code changes'.",
       ],
@@ -1178,9 +1165,8 @@ function registerTools(pi: ExtensionAPI): void {
             if (existing && existing.status !== "failed" && existing.status !== "cancelled") {
               const statusDesc = existing.status === "completed" ? "already completed" : `currently ${existing.status}`;
               const text = `Dedup: promise with subject "${args.subject}" ${statusDesc} — returning existing ${existing.id}`;
-              const guard = `⚠️ Do NOT run this task yourself — promise ${existing.id} already handles it. Use promise-then to chain follow-up work.`;
               return {
-                content: [{ type: "text", text: `${text}\n\n${guard}` }],
+                content: [{ type: "text", text: `${text}` }],
                 details: {
                   promiseId: existing.id,
                   name: existing.name,
@@ -1268,12 +1254,9 @@ function registerTools(pi: ExtensionAPI): void {
           : "";
         const commandDisplay = promise.command?.slice(0, 100) ?? promise.url ?? "";
         const text = `Started ${promise.type}: ${promise.id}${subjectInfo}${chainInfo}${replaceInfo}`;
-        const guard = commandDisplay
-          ? `⚠️ Do NOT run this command yourself — the promise handles it: ${commandDisplay}`
-          : `⚠️ Do NOT run this task yourself — promise ${promise.id} handles it.`;
 
         return {
-          content: [{ type: "text", text: `${text}\n\n${guard}` }],
+          content: [{ type: "text", text: `${text}` }],
           details: {
             promiseId: promise.id,
             name: promise.name,

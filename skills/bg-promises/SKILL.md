@@ -227,38 +227,22 @@ explicitly say "do not touch this task." The agent then thinks "I should also st
   → Now install marked based on the fresh result.
 ```
 
-### Strict Rules — Follow Every Time
+### Acting on Results
 
-**Rule 1 — Read the promise-create result carefully.** It now includes an explicit ⚠️ warning telling you what NOT to do. If you see:
-```
-⚠️ Do NOT run this command yourself — the promise handles it: kubectl get pods
-```
-**Believe it.** Do NOT run `kubectl get pods` yourself.
+When a promise completion notification arrives, the result is fresh and ready to use:
+- **✅ Completed** — inspect the output, use it naturally
+- **❌ Failed** — diagnose the error, retry if appropriate
+- **⏱ Cancelled** — check the reason, rechain if needed
 
-**Rule 2 — After creating a promise, do NOT do the same work.** 
-- If the promise runs `npm test` — do NOT also run `npm test` via bash.
-- If the promise downloads a file — do NOT also `curl` it.
-- If the promise saves to KB — do NOT also call `kb_save_skill`.
-
-**Rule 3 — Work on DIFFERENT things instead.**
-- Promise runs test suite → you review code, read docs, answer user questions.
-- Promise downloads data → you check data schema, review training script.
-- Promise processes files → you check config, plan next steps.
-
-**Rule 4 — Use `promise-then` to sequence, not `promise-block-until-complete`.**
-- Want to process data after download? `promise-then(promiseId, command=...)`
-- Want to alert on failure? `promise-then(promiseId, command=..., condition="on-failure")`
-- Never block. Never duplicate. Trust the chain.
-
-**Rule 5 — Stale notifications.** If a promise notification arrives for work you already duplicated, the result is stale. Acknowledge and move on.
+Don't start the **same** task manually while a promise handles it — work on other things instead. When the result arrives, use it like any other tool result.
 
 ### Decision table
 
 | Situation | Action |
 |-----------|--------|
-| Promise `subject` covers task X | Do NOT work on X. Work on Y instead. |
+| Promise `subject` covers task X | Work on other things; result will auto-deliver |
 | No promise covers task X | Safe to work on X directly |
-| Promise notification for already-done work | Result is stale — skip it |
+| Promise notification arrives | Use the result naturally — it's fresh, not stale |
 | Unsure what promises exist | Call `promise-graph()` or `promises-list()` — check `subject` fields |
 
 ### 🎯 Dedup and Replace — Programmatic Duplicate Prevention
