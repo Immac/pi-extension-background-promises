@@ -981,7 +981,7 @@ function registerTools(pi: ExtensionAPI): void {
             content: lines.join("\n"),
             display: true,
           },
-          { triggerTurn: false, deliverAs: "nextTurn" }
+          { triggerTurn: true, deliverAs: "followUp" }
         );
       } else if (promise.status === "failed") {
         const lines = [
@@ -1000,7 +1000,7 @@ function registerTools(pi: ExtensionAPI): void {
             content: lines.join("\n"),
             display: true,
           },
-          { triggerTurn: false, deliverAs: "nextTurn" }
+          { triggerTurn: true, deliverAs: "followUp" }
         );
       } else if (promise.status === "cancelled") {
         const lines = [
@@ -1027,7 +1027,7 @@ function registerTools(pi: ExtensionAPI): void {
             content: lines.join("\n"),
             display: true,
           },
-          { triggerTurn: false, deliverAs: "nextTurn" }
+          { triggerTurn: true, deliverAs: "followUp" }
         );
       }
 
@@ -1038,7 +1038,7 @@ function registerTools(pi: ExtensionAPI): void {
       // This lets agents that poll for changes see progress without a full notification
       try {
         if (promise.status === "running" && promise.subject) {
-          // Use nextTurn with display=false so it doesn't interrupt the agent
+          // Use display=false so it doesn't interrupt the agent
           pi.sendMessage(
             {
               customType: "promise-status-update",
