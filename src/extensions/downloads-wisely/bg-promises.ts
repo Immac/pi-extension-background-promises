@@ -870,7 +870,7 @@ function _isTmuxAvailable(): boolean {
   _tmuxChecked = true;
   try {
     execSync("tmux -V", { stdio: "ignore" });
-    _tmuxAvailable = !!process.env.TMUX;
+    _tmuxAvailable = true;
   } catch {
     _tmuxAvailable = false;
   }
