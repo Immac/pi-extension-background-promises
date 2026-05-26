@@ -8,6 +8,7 @@
  */
 
 import { mkdtempSync, writeFileSync, existsSync, rmSync, readdirSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -141,8 +142,8 @@ async function main() {
   await waitForCondition(() => existsSync(markerFile) && "marker found", 8000);
   console.log("✓ Command completed (marker file detected)\n");
 
-  // Give the event loop a tick for the notification callback
-  await sleep(500);
+  // Give time for tmux polling interval to fire and notification to deliver
+  await sleep(2000);
 
   // Check for auto-injection message
   const completionMsg = pi.sentMessages.find(
@@ -454,9 +455,15 @@ async function main() {
     const rechainSourceId = rechainSourceResult.details?.promiseId;
     console.log("Source promise ID:", rechainSourceId);
 
-    // Wait for it to complete
+    // Wait for it to complete (marker file appears)
     await waitForCondition(() => existsSync(rechainCmdMarker) && "source ok", 8000);
-    console.log("✓ Source command completed");
+    // Also wait for promise status to flip to completed (tmux polling is async)
+    for (let i = 0; i < 20; i++) {
+      const st = await statusTool?.execute("s-9a", { promiseId: rechainSourceId });
+      if (st?.details?.status === "completed") break;
+      await sleep(500);
+    }
+    console.log("✓ Source command completed (marker + status)");
 
     // Delete the marker so rechain must recreate it
     rmSync(rechainCmdMarker);

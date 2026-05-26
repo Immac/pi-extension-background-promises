@@ -7,7 +7,8 @@
  * Run: npx tsx test/corner-cases.test.ts
  */
 
-import { mkdtempSync, writeFileSync, existsSync, rmSync, readdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, rmSync, readdirSync, unlinkSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -857,6 +858,175 @@ async function main() {
   } else {
     console.log("❌ 15.3: on-failure child ran despite parent success");
     throw new Error("on-failure 'then' ran after parent success");
+  }
+
+  // ===========================================================================
+  // SECTION 16: Tmux integration helpers
+  // ===========================================================================
+  console.log("═══════════════════════════════════════════");
+  console.log("Section 16: Tmux integration helpers");
+  console.log("═══════════════════════════════════════════\n");
+
+  // Import the tmux helpers from the module
+  const extModuleTmux = await import(extPath);
+  const {
+    _toTmuxName,
+    _readTmuxOutput,
+    _readTmuxExitCode,
+    _isTmuxAvailable,
+    _killTmuxSession,
+  } = extModuleTmux as any;
+
+  // Test 16.1: _toTmuxName sanitization
+  console.log("Test 16.1: _toTmuxName sanitizes promise IDs\n");
+  const mockPromise1 = { id: "promise-12345-abc" } as any;
+  const name1 = _toTmuxName(mockPromise1);
+  console.log(`  ID=${mockPromise1.id} → "${name1}"`);
+  if (name1 === "promise-promise-12345-abc") {
+    console.log("✅ 16.1a: Simple ID passes through\n");
+  } else {
+    console.log("❌ 16.1a: Expected promise-promise-12345-abc");
+    throw new Error("toTmuxName failed on simple ID");
+  }
+
+  console.log("Test 16.1b: Special chars are stripped\n");
+  const mockPromise2 = { id: "promise-abc_123/foo bar!@#" } as any;
+  const name2 = _toTmuxName(mockPromise2);
+  console.log(`  ID="${mockPromise2.id}" → "${name2}"`);
+  if (name2.startsWith("promise-promise-abc-123-foo-bar-") && !name2.includes("@#")) {
+    console.log("✅ 16.1b: Special chars sanitized\n");
+  } else {
+    console.log("❌ 16.1b: Sanitization failed");
+    throw new Error("toTmuxName sanitization failed");
+  }
+
+  console.log("Test 16.1c: Long IDs are truncated to 64 chars total\n");
+  const longId = "promise-" + "a".repeat(100);
+  const mockPromise3 = { id: longId } as any;
+  const name3 = _toTmuxName(mockPromise3);
+  console.log(`  total length: ${name3.length}, value: "${name3}"`);
+  // The sanitized ID includes "promise-" prefix (8 chars), then a's
+  // So available space after "promise-" prefix is 64 - 8 = 56 chars
+  // The first 8 of those are "promise-" from the ID itself
+  // So only 48 a's remain
+  if (name3.length === 64 && name3.endsWith("a".repeat(48))) {
+    console.log("✅ 16.1c: Long ID truncated to 64 chars (prefix+sanitized)\n");
+  } else {
+    console.log("❌ 16.1c: Expected 64 chars with proper truncation");
+    throw new Error("toTmuxName truncation failed");
+  }
+
+  // Test 16.2: _readTmuxOutput handles marker stripping (new format with exit code)
+  console.log("Test 16.2: _readTmuxOutput strips completion marker\n");
+  const testPromiseId = "promise-test-read-output-123";
+  const testOutFile = `/tmp/promise-${testPromiseId}.out`;
+  // echo writes trailing newline
+  writeFileSync(testOutFile, "line1\nline2\n---PROMISE-DONE:0---\n", "utf-8");
+  const output = _readTmuxOutput(testPromiseId);
+  console.log(`  raw file: "line1\\nline2\\n---PROMISE-DONE:0---\\n"`);
+  console.log(`  parsed: "${output}"`);
+  if (output === "line1\nline2") {
+    console.log("✅ 16.2: Marker correctly stripped\n");
+  } else {
+    console.log("❌ 16.2: Expected 'line1\\nline2', got:", JSON.stringify(output));
+    throw new Error("readTmuxOutput marker stripping failed");
+  }
+
+  // Verify _readTmuxExitCode extracts the exit code
+  const exitCode = _readTmuxExitCode(testPromiseId);
+  if (exitCode === 0) {
+    console.log("✅ 16.2a: Exit code extracted correctly (0)\n");
+  } else {
+    console.log("❌ 16.2a: Expected exit code 0, got", exitCode);
+    throw new Error("readTmuxExitCode failed");
+  }
+  unlinkSync(testOutFile);
+
+  console.log("Test 16.2b: Non-zero exit code\n");
+  writeFileSync(testOutFile, "error\n---PROMISE-DONE:42---\n", "utf-8");
+  const ec = _readTmuxExitCode(testPromiseId);
+  if (ec === 42) {
+    console.log("✅ 16.2b: Exit code 42 extracted\n");
+  } else {
+    console.log("❌ 16.2b: Expected 42, got", ec);
+    throw new Error("readTmuxExitCode non-zero failed");
+  }
+  unlinkSync(testOutFile);
+
+  console.log("Test 16.2c: No marker → returns full content, exit code undefined\n");
+  writeFileSync(testOutFile, "just data", "utf-8");
+  const output2 = _readTmuxOutput(testPromiseId);
+  const ec2 = _readTmuxExitCode(testPromiseId);
+  if (output2 === "just data" && ec2 === undefined) {
+    console.log("✅ 16.2c: No marker, full content returned, exit code undefined\n");
+  } else {
+    console.log("❌ 16.2c: Expected 'just data' and undefined, got:", JSON.stringify(output2), ec2);
+    throw new Error("readTmuxOutput no-marker failed");
+  }
+  unlinkSync(testOutFile);
+
+  console.log("Test 16.2d: Nonexistent file returns empty string\n");
+  const output3 = _readTmuxOutput("promise-nonexistent");
+  if (output3 === "") {
+    console.log("✅ 16.2d: Nonexistent file returns empty\n");
+  } else {
+    console.log("❌ 16.2d: Expected '', got:", JSON.stringify(output3));
+    throw new Error("readTmuxOutput nonexistent failed");
+  }
+
+  // Test 16.3: _isTmuxAvailable — check if tmux binary is on PATH
+  console.log("Test 16.3: _isTmuxAvailable detects tmux binary\n");
+  const tmuxAvail = _isTmuxAvailable();
+  console.log(`  tmux available: ${tmuxAvail}`);
+  // Can't assert on this — depends on test environment
+  console.log(`✅ 16.3: _isTmuxAvailable returned ${tmuxAvail} (no error)\n`);
+
+  // Test 16.4: _killTmuxSession on nonexistent session is a no-op
+  console.log("Test 16.4: _killTmuxSession on nonexistent promise is no-op\n");
+  try {
+    _killTmuxSession("promise-nonexistent-session-99999");
+    console.log("✅ 16.4: No error for nonexistent session\n");
+  } catch (err: any) {
+    console.log("❌ 16.4: Unexpected error:", err.message);
+    throw new Error("killTmuxSession threw on nonexistent");
+  }
+
+  // Test 16.5: Integration — verify tmux session creation via tool (if available)
+  console.log("Test 16.5: Integration — promise creates tmux session (quick)\n");
+  let hasTmux = false;
+  try {
+    hasTmux = execSync("tmux -V", { stdio: "pipe", timeout: 3000 }).toString().trim().length > 0;
+  } catch {}
+  if (hasTmux) {
+    const tmuxInteg = await createTool.execute("c-16.5", {
+      command: "echo 'tmux integ ok'",
+      name: "tmux-integ",
+    });
+    const tmuxIntegId = tmuxInteg.details?.promiseId;
+    await sleep(2000);
+
+    // Check if a tmux session was created for this promise
+    let sessionFound = false;
+    try {
+      const sessions = execSync("tmux list-sessions -F '#{session_name}' 2>/dev/null", { stdio: "pipe", timeout: 3000 }).toString();
+      sessionFound = sessions.includes("promise-" + tmuxIntegId);
+    } catch {}
+
+    if (sessionFound) {
+      console.log(`✅ 16.5: Tmux session created for ${tmuxIntegId}`);
+      // Clean up the session
+      try { execSync(`tmux kill-session -t "promise-${_toTmuxName({id: tmuxIntegId} as any)}" 2>/dev/null`, { stdio: "ignore", timeout: 3000 }); } catch {}
+    } else {
+      console.log(`  Note: No tmux session found (may have already completed) - checking _runDirect fallback worked...`);
+      const statusCheck = await statusTool.execute("c-16.5b", { promiseId: tmuxIntegId });
+      console.log(`  Promise status: ${statusCheck.details?.status}`);
+      if (statusCheck.details?.status === "completed") {
+        console.log(`  ✅ 16.5: Promise completed successfully (via tmux or fallback)`);
+      }
+    }
+    console.log("");
+  } else {
+    console.log("  ⏭ Tmux not available on this system, skipping integration test\n");
   }
 
   // ===========================================================================

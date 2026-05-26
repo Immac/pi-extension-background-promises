@@ -881,7 +881,11 @@ function _isTmuxAvailable(): boolean {
  * Sanitize a string for use as a tmux session name — alphanumeric + hyphens only.
  */
 function _toTmuxName(promise: BackgroundPromise): string {
-  return "promise-" + promise.id.replace(/[^a-zA-Z0-9\-]/g, "-").slice(0, 64);
+  const prefix = "promise-";
+  const maxTotal = 64;
+  const sanitized = promise.id.replace(/[^a-zA-Z0-9\-]/g, "-");
+  const available = maxTotal - prefix.length;
+  return prefix + sanitized.slice(0, Math.max(available, 0));
 }
 
 /**
@@ -905,18 +909,36 @@ function _killTmuxSession(promiseId: string): void {
 
 /**
  * Read captured output from the tmp file. Returns trimmed string or empty.
+ * Marker format: ---PROMISE-DONE:<exit_code>---
  */
 function _readTmuxOutput(promiseId: string): string {
   const outFile = `/tmp/promise-${promiseId}.out`;
   try {
     if (!existsSync(outFile)) return "";
     let content = readFileSync(outFile, "utf-8");
-    // Strip the completion marker if present
-    const markerIdx = content.lastIndexOf("\n---PROMISE-DONE---\n");
-    if (markerIdx >= 0) content = content.slice(0, markerIdx);
+    // Strip the completion marker if present (trailing \n from echo is OK)
+    const markerMatch = content.match(/\n---PROMISE-DONE:\d+---(\n?)$/);
+    if (markerMatch) content = content.slice(0, markerMatch.index);
     return content.trim();
   } catch {
     return "";
+  }
+}
+
+/**
+ * Extract the exit code from the tmux output file marker.
+ * Returns undefined if no marker or invalid.
+ */
+function _readTmuxExitCode(promiseId: string): number | undefined {
+  const outFile = `/tmp/promise-${promiseId}.out`;
+  try {
+    if (!existsSync(outFile)) return undefined;
+    const content = readFileSync(outFile, "utf-8");
+    const match = content.match(/---PROMISE-DONE:(\d+)---(\n?)$/);
+    if (match) return parseInt(match[1], 10);
+    return undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -936,10 +958,15 @@ function _runInTmux(promise: BackgroundPromise): void {
   const scriptFile = `/tmp/promise-${promise.id}.sh`;
   _tmuxSessions.set(promise.id, sessionName);
 
-  // Write a temp script that runs the command, tees output, and stays open
+  // Write a temp script that runs the command in a subshell (so 'exit' inside
+  // the command doesn't kill the script before the marker is written), tees
+  // output to a capture file, and stays open for user inspection.
   const script = `#!/bin/bash
-${promise.command} 2>&1 | tee "${outFile}"
-echo "---PROMISE-DONE---" >> "${outFile}"
+(
+${promise.command}
+) 2>&1 | tee "${outFile}"
+_ec=\${PIPESTATUS[0]}
+echo "---PROMISE-DONE:\${_ec}---" >> "${outFile}"
 echo ""
 echo "┌──────────────────────────────────────────────────┐"
 echo "│  Promise complete — you can close this pane.     │"
@@ -967,10 +994,14 @@ exec bash
       try {
         if (existsSync(outFile)) {
           const content = readFileSync(outFile, "utf-8");
-          if (content.includes("\n---PROMISE-DONE---\n")) {
+          if (/---PROMISE-DONE:\d+---/.test(content)) { // no $ anchor — file ends with \n from echo
             clearInterval(pollInterval);
-            promise.status = "completed";
+            const exitCode = _readTmuxExitCode(promise.id);
+            promise.status = exitCode === 0 ? "completed" : "failed";
             promise.result = { output: _readTmuxOutput(promise.id) };
+            if (exitCode !== 0 && exitCode !== undefined) {
+              promise.error = `Command exited with code ${exitCode}`;
+            }
             promise.completedAt = Date.now();
             setPromise(promise);
             _updateStatusBar();
@@ -2164,4 +2195,4 @@ export default function (pi: ExtensionAPI) {
 }
 
 // Exported for testing
-export { findTerminalPromise, collectRootPromises };
+export { findTerminalPromise, collectRootPromises, _isTmuxAvailable, _toTmuxName, _killTmuxSession, _readTmuxOutput, _readTmuxExitCode };
