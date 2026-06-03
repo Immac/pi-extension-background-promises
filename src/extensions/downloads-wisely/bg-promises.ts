@@ -1554,20 +1554,13 @@ function cancelAllPromises(): void {
         clearInterval(timer);
         _progressTimers.delete(promise.id);
       }
-      // Kill tmux session if running in one
-      _killTmuxSession(promise.id);
-      // Mark as cancelled
-      promise.status = "cancelled";
-      promise.error = "pi exited — session ended";
-      promise.completedAt = Date.now();
-      promise.notified = true; // suppress notification (no agent session)
-      setPromise(promise);
+      // Clear child PID (won't survive reload)
+      promise.childPid = undefined;
+      // Don't change status or kill tmux sessions — reload reconnects them
     }
   }
-  // Persist the updated state
+  // Persist state for the next session to pick up
   _saveState();
-  // Clean any remaining orphaned sessions from this tmux session
-  _killOrphanedTmuxSessions();
 }
 
 // =============================================================================
