@@ -92,7 +92,7 @@ All promises (root and chained) auto-deliver results:
 • Type: command
 • Status: completed
 • Result: { "output": "Epoch 50/50 — loss: 0.023" }
-You can get full structured details with promise-block-until-complete("promise-xxx").
+You can get full structured details by checking the promise (though it's rarely needed — auto-delivery handles everything).
 
 **Tip:** Instead of blocking, use `promise-then(promiseId=..., command=...)` to chain follow-up work automatically without blocking.
 ```
@@ -317,9 +317,7 @@ Press F4 to collapse
 
 ### Smart Await Heuristics
 
-`promise-block-until-complete` is rarely needed but smart when used:
-- **Downloads**: File-growth detection — polls file size, times out only after no progress for N seconds, considers done after a grace period
-- **Commands**: Polls for process exit, returns stdout/stderr
+`promise-block-until-complete` is **deprecated and should not be used**. The auto-delivery system handles everything — results arrive as messages, chains execute automatically. See the decision guide above for why blocking is never the right choice.
 
 ### Process Cleanup
 

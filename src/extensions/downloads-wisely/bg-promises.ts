@@ -1775,8 +1775,7 @@ function registerTools(pi: ExtensionAPI): void {
           // Include result in details for agent use
           return { 
             content: [{ type: "text", text: `Promise completed
-
-Tip: Instead of blocking here, you could have used promise-then(promiseId="${promise.id}", command=..., condition="on-success") to chain follow-up work automatically. The chain executes while you keep working.` }], 
+Tip: Never block on a promise — results auto-deliver. Instead, use promise-then(promiseId="${promise.id}", command=..., condition="on-success") to chain follow-up work automatically while you keep working.` }], 
             details: { 
               success: true, 
               result: promise.result,

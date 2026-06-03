@@ -378,7 +378,7 @@ Subjects are case-sensitive and must match exactly for dedup/replace to work.
 - **Reading small files** — just use `read()`
 - **Quick git operations** — just run inline
 - **User interaction** (auth prompts, confirmations) — must block
-- **The result is needed before any other work is possible** — rare, use `promise-block-until-complete`
+- **The result is needed before any other work is possible** — still don't block. Use `promise-then` to chain what needs the result, and keep working on other things.
 
 Otherwise: **fire a promise.**
 
@@ -461,7 +461,7 @@ No orphaned processes remain after pi closes.
 - `promise-then` — chain a task after an existing promise
 - `promise-rechain` — re-attach a cancelled/failed promise to a different parent
 - `promise-graph` — inspect chain relationships (tree view for one or all chains)
-- `promise-block-until-complete` — ⚠️ block until done (last resort — use promise-then instead)
+- `promise-block-until-complete` — ⛔ DEPRECATED — never use. Results auto-deliver. See philosophy above.
 - `promise-status` — non-blocking check
 - `promises-list` — list all promises as a chain tree
 - `promise-cancel` — cancel a running task
