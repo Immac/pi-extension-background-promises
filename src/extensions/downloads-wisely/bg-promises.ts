@@ -1173,8 +1173,8 @@ function _runInTmux(promise: BackgroundPromise): void {
   // output to a capture file, and stays open for user inspection.
   const script = `#!/bin/bash
 (
-${promise.command}
-) 2>&1 | tee "${outFile}"
+stdbuf -oL sh -c '${promise.command.replace(/'/g, "'\\''")}'
+) 2>&1 | stdbuf -oL tee "${outFile}"
 _ec=\${PIPESTATUS[0]}
 echo "---PROMISE-DONE:\${_ec}---" >> "${outFile}"
 echo ""
@@ -1206,13 +1206,16 @@ exec bash
           const content = readFileSync(outFile, "utf-8");
 
           // Scan for progress markers: PROMISE_PROGRESS:N
-          const progressMatch = content.match(/PROMISE_PROGRESS:(\d+)/);
-          if (progressMatch) {
-            const val = parseInt(progressMatch[1], 10);
-            if (!isNaN(val) && val >= 0 && val <= 100) {
-              promise.progress = val;
-              setPromise(promise);
-            }
+          // Use matchAll + last match to get the latest progress value
+          const progressRegex = /PROMISE_PROGRESS:(\d+)/g;
+          let progressMatch: RegExpExecArray | null;
+          let lastProgressVal: number | undefined;
+          while ((progressMatch = progressRegex.exec(content)) !== null) {
+            lastProgressVal = parseInt(progressMatch[1], 10);
+          }
+          if (lastProgressVal !== undefined && !isNaN(lastProgressVal) && lastProgressVal >= 0 && lastProgressVal <= 100) {
+            promise.progress = lastProgressVal;
+            setPromise(promise);
           }
 
           // Extract last non-marker line for status message
@@ -1283,14 +1286,16 @@ function _runDirect(promise: BackgroundPromise): void {
 
     proc.stdout?.on("data", (data: Buffer) => {
       const chunk = data.toString();
-      // Scan for progress markers: PROMISE_PROGRESS:N
-      const progressMatch = chunk.match(/PROMISE_PROGRESS:(\d+)/);
-      if (progressMatch) {
-        const val = parseInt(progressMatch[1], 10);
-        if (!isNaN(val) && val >= 0 && val <= 100) {
-          promise.progress = val;
-          setPromise(promise);
-        }
+      // Scan for progress markers: PROMISE_PROGRESS:N (take last value in chunk)
+      const progressRegex = /PROMISE_PROGRESS:(\d+)/g;
+      let progressMatch: RegExpExecArray | null;
+      let lastProgressVal: number | undefined;
+      while ((progressMatch = progressRegex.exec(chunk)) !== null) {
+        lastProgressVal = parseInt(progressMatch[1], 10);
+      }
+      if (lastProgressVal !== undefined && !isNaN(lastProgressVal) && lastProgressVal >= 0 && lastProgressVal <= 100) {
+        promise.progress = lastProgressVal;
+        setPromise(promise);
       }
       // Keep non-progress lines in output (filter out PROGRESS markers)
       const filtered = chunk.replace(/PROMISE_PROGRESS:\d+\n?/g, "").replace(/PROMISE_PROGRESS:\d+/g, "");
