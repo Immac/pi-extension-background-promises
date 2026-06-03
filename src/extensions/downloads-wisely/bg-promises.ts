@@ -513,7 +513,7 @@ function _getCompactStatus(theme: any): string | undefined {
   }
 
   // Combine: F4 hint + chain view + aggregate counts
-  const hint = theme.fg("dim", "[F4]");
+  const hint = theme.fg("dim", "[/promise]");
   const middle = chainStr ? `${chainStr}  ${aggParts.join(" ")}` : aggParts.join(" ");
   const result = `${hint} ${middle}`;
   return result;
@@ -639,7 +639,7 @@ function _getExpandedLines(theme: any): string[] {
   }
 
   lines.push("");
-  lines.push(theme.fg("dim", "Press F4 to collapse"));
+  lines.push(theme.fg("dim", "Use /promise to collapse"));
 
   return lines;
 }
@@ -1070,6 +1070,10 @@ let _tmuxChecked = false;
 let _tmuxAvailable = false;
 
 /** Track tmux session names by promise ID for cleanup */
+/** Unique instance ID per pi session — used to namespace tmux sessions
+ * so cleanup only kills orphans from this pi instance, not other sessions. */
+const _instanceId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
 const _tmuxSessions = new Map<string, string>();
 
 /**
@@ -1091,7 +1095,7 @@ function _isTmuxAvailable(): boolean {
  * Sanitize a string for use as a tmux session name — alphanumeric + hyphens only.
  */
 function _toTmuxName(promise: BackgroundPromise): string {
-  const prefix = "promise-";
+  const prefix = `promise-${_instanceId}-`;
   const maxTotal = 64;
   const sanitized = promise.id.replace(/[^a-zA-Z0-9\-]/g, "-");
   const available = maxTotal - prefix.length;
@@ -1101,6 +1105,25 @@ function _toTmuxName(promise: BackgroundPromise): string {
 /**
  * Kill a tmux session by promise ID. Called on cancel/shutdown.
  */
+/** Kill all orphaned promise tmux sessions — sessions from previous pi loads
+ * that were never cleaned up. Called on startup to prevent accumulation. */
+function _killOrphanedTmuxSessions(): void {
+  try {
+    const instancePrefix = `promise-${_instanceId}-`;
+    const output = execSync(`tmux list-sessions -F "#S" 2>/dev/null`, { stdio: "pipe", encoding: "utf-8", timeout: 3000 });
+    const lines = output.trim().split("\n");
+    for (const line of lines) {
+      if (line.startsWith(instancePrefix)) {
+        try {
+          execSync(`tmux kill-session -t "${line}" 2>/dev/null`, { stdio: "ignore" });
+        } catch {}
+      }
+    }
+  } catch {
+    // tmux may not be available
+  }
+}
+
 function _killTmuxSession(promiseId: string): void {
   const sessionName = _tmuxSessions.get(promiseId);
   if (!sessionName) return;
@@ -1390,6 +1413,8 @@ function cancelAllPromises(): void {
       setPromise(promise);
     }
   }
+  // Kill any orphaned tmux sessions not in the tracked map
+  _killOrphanedTmuxSessions();
 }
 
 // =============================================================================
@@ -1500,6 +1525,7 @@ function registerTools(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     sessionCtx = { ui: ctx.ui, theme: ctx.ui.theme };
+    _killOrphanedTmuxSessions();
     _updateStatusBar(sessionCtx);
   });
 
@@ -1519,16 +1545,68 @@ function registerTools(pi: ExtensionAPI): void {
       }
     },
   });
-  // F4 is the primary toggle (terminals don't intercept function keys)
+  // F4 toggles expanded view (may be intercepted by some terminals)
+  // Also available as /promises command
   pi.registerShortcut("f4", {
     description: "Toggle expanded promise status bar",
     handler: async (ctx) => {
       _expanded = !_expanded;
       _updateStatusBar({ ui: ctx.ui, theme: ctx.ui.theme });
-      if (_expanded) {
-        ctx.ui.notify("Promise status expanded \u2014 F4 to collapse", "info");
+      ctx.ui.notify(_expanded ? "Promise status expanded \u2014 F4 to collapse" : "Promise status collapsed \u2014 F4 to expand", "info");
+    },
+  });
+
+  pi.registerCommand("promise", {
+    description: "Toggle expanded promise status bar, or /promise <index> to open a promise's tmux session",
+    handler: async (args, ctx) => {
+      const arg = args.trim();
+      if (!arg) {
+        // No args: toggle expanded
+        _expanded = !_expanded;
+        _updateStatusBar({ ui: ctx.ui, theme: ctx.ui.theme });
+        ctx.ui.notify(_expanded ? "Promise status expanded" : "Promise status collapsed", "info");
+        return;
+      }
+
+      // Find promise by index (1-based root index) or by ID prefix
+      const roots = collectRootPromises();
+      let target: BackgroundPromise | undefined;
+
+      const index = parseInt(arg, 10);
+      if (!isNaN(index) && index >= 1 && index <= roots.length) {
+        target = roots[index - 1];
       } else {
-        ctx.ui.notify("Promise status collapsed \u2014 F4 to expand", "info");
+        // Search by ID prefix
+        target = Array.from(promises.values()).find(p => p.id.startsWith(arg) || p.name.includes(arg));
+      }
+
+      if (!target) {
+        ctx.ui.notify(`Promise not found: ${arg}. Use /promises to list.`, "error");
+        return;
+      }
+
+      // Find the tmux session name
+      const sessionName = _tmuxSessions.get(target.id);
+      if (!sessionName || target.status === "completed" || target.status === "failed" || target.status === "cancelled") {
+        ctx.ui.notify(`Promise "${target.name}" (${target.id}) is no longer running`, "warning");
+        return;
+      }
+
+      // Open the tmux session in a new terminal window
+      try {
+        const isInTmux = !!process.env.TMUX;
+        if (isInTmux) {
+          // Inside tmux: create a new window
+          execSync(`tmux new-window -n "${target.name}" "tmux attach-session -t '${sessionName}'" 2>/dev/null`, { stdio: "ignore", timeout: 5000 });
+        } else {
+          // Outside tmux: try known terminal emulators
+          execSync(`kitty @ launch --hold --type=window tmux attach-session -t '${sessionName}' 2>/dev/null || ` +
+            `x-terminal-emulator -e tmux attach-session -t '${sessionName}' 2>/dev/null || ` +
+            `konsole --hold -e tmux attach-session -t '${sessionName}' 2>/dev/null`, { stdio: "ignore", timeout: 5000 });
+        }
+        ctx.ui.notify(`Opened promise "${target.name}" in a terminal window`, "info");
+      } catch {
+        ctx.ui.notify(`Could not open terminal. Run: tmux attach-session -t "${sessionName}"`, "warning");
       }
     },
   });
