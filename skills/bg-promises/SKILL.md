@@ -14,8 +14,9 @@ description: Run background tasks without blocking — fire promises, keep worki
 |-----------|---------------|
 | Task takes >2 seconds and you have other work | ✅ `promise-create(subject=..., ...)` → **keep working on DIFFERENT tasks** |
 | You need to do something after a task finishes | ✅ `promise-then(promiseId=..., command=...)` |
-| You absolutely need the result to continue | ✅ `promise-then(promiseId=..., command=...)` — still don't block |
-| You must block (no other work possible) | ⚠️ `promise-block-until-complete(promiseId=...)` — last resort |
+| You have nothing else to do while a promise runs | ✅ Stop your turn — the 🔔 notification will wake you when ready |
+
+**Never block on a promise.** There is no reason to. The result auto-delivers as a message, and the notification pulls you back into the conversation. Blocking replaces productive work with dead time. If you have nothing else to do, just stop — the promise system wakes you up naturally.
 
 **Do not wait if you can work — but work on DIFFERENT things.** Every time you use `promise-create`, you give yourself the ability to answer more of the user's questions, review more code, or chain next steps — all while the task runs. Use `subject` to label what the promise handles, and do NOT start working on that same task yourself.
 

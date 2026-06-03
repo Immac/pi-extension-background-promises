@@ -42,7 +42,7 @@ Agent: "Download complete. Here's my review of train.py..."
 | `promise-then` | Chain a command or download **after** any existing promise. Multiple calls create a sequence. Supports `condition`: `always` (default), `on-success`, `on-failure`. Returns full chain visualization. |
 | `promise-graph` | Inspect chain relationships — tree view for a specific promise or all chains. |
 | `promise-rechain` | Re-attach a cancelled/failed promise's command to a different parent chain. |
-| `promise-block-until-complete` | ⚠️ Block until a promise completes (last resort — results auto-deliver). Has smart download stall detection. Prefer promise-then for chaining. |
+| `promise-block-until-complete` | ⛔ DEPRECATED — never use. Results auto-deliver. Trust the notification. See reasoning below. |
 | `promise-status` | Check status without blocking. Returns last known result. |
 | `promises-list` | List all tracked promises as a chain tree showing parent-child relationships. |
 | `promise-cancel` | Cancel a pending or running promise (kills child process). |
@@ -59,10 +59,25 @@ Agent: "Download complete. Here's my review of train.py..."
 | Installing packages, building | ✅ Yes — start, then continue reviewing |
 | Reading a file | ❌ No — too fast, just read directly |
 | Quick git operations | ❌ No — just run them inline |
-| You need the result to continue | ⚠️ Use `promise-then` to chain instead of `promise-block-until-complete` |
-| You must block (interactive auth, user input) | ⚠️ Use `promise-block-until-complete` as last resort |
 
 **Default to using promises.** If a task takes more than a few seconds, fire it and move on. The auto-delivery pattern means you never forget about it — the result will arrive when ready.
+
+### Why you should NEVER block on a promise
+
+**The old model:** Fire a task, poll/await it, get result, continue. The agent stands still, watching a progress bar.
+
+**The promise model:** Fire a task, keep working on OTHER things. The result arrives as a message. The agent never stalls.
+
+There is no scenario where blocking beats this model:
+
+| If you need to... | Instead of blocking... | Do this |
+|-------------------|----------------------|---------|
+| Do something after the promise | `promise-block-until-complete` → chain | `promise-then(promiseId, command=...)` |
+| Check if it's done | poll or await | Wait for the 🔔 notification — it auto-delivers |
+| Use the result in your response | wait for it | Respond with what you have; the notification will wake you when ready |
+| Wait because you have nothing else | block on the promise | Stop your turn — the 🔔 notification wakes you up automatically |
+
+**Even when you have "nothing else to do," blocking is wrong.** Just stop. The promise notification will wake you when the result arrives, and you'll pick up naturally from there. This is the same pattern as telling a human "I'll ping you when it's done" — you don't stand there staring at them.
 
 ---
 

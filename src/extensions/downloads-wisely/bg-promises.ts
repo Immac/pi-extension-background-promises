@@ -1738,8 +1738,8 @@ function registerTools(pi: ExtensionAPI): void {
     defineTool({
       name: "promise-block-until-complete",
       label: "Promise Block Until Complete",
-      description: "⚠️ LAST RESORT — Block until a background promise completes. PREFER promise-then(promiseId, command=...) instead which chains work without blocking. This tool should only be used when you have absolutely no other work to do and the result is blocking. Results auto-deliver — you generally don't need this.",
-      promptSnippet: "⚠️ Block until a background promise completes (last resort — auto-delivery preferred)",
+      description: "⚠️ DEPRECATED — Do not use. Results auto-deliver. Trust the notification. Never wait for a promise; always keep working and let the result wake you up.",
+      promptSnippet: "⚠️ DEPRECATED — never block on a promise, trust auto-delivery",
       promptGuidelines: [
         "⚠️ Do NOT call this tool unless you have absolutely no other work to do.",
         "Results auto-deliver as messages — trust auto-delivery instead of blocking.",
