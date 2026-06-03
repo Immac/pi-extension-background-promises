@@ -315,15 +315,47 @@ Variant D format: each chain is a root-indexed path showing type + status per no
 Press F4 to collapse
 ```
 
-### Smart Await Heuristics
+### 🔄 Persistence — Survives Reload
 
-`promise-block-until-complete` is **deprecated and should not be used**. The auto-delivery system handles everything — results arrive as messages, chains execute automatically. See the decision guide above for why blocking is never the right choice.
+Promises are persisted to `~/.pi/agent/promise-state.json` after every state change. Running promises survive pi reload:
+
+```
+User:  promise-create(command="npm test", name="tests")
+      → Started: promise-abc
+      → [reloads pi]
+      → promises-list shows promise-abc still running
+      → 🔔 notification arrives when tests complete
+```
+
+On reload, the extension:
+1. Restores all promises from the state file
+2. Re-discovers their tmux sessions by matching session names
+3. Reconnects completion polling, progress tracking, and status messages
+4. Restores the status bar footer
+
+**Tmux session lifecycle:**
+- Created when a promise starts (detached via `tmux new-session -d`)
+- Survives pi reload (not tied to pi's process tree)
+- Auto-killed when the promise completes, fails, or is cancelled
+- No orphaned sessions — cleanup is handled by `setPromise()` on terminal states
+
+### `/promise` Command
+
+| Command | Action |
+|---------|--------|
+| `/promise` | Toggle expanded status bar |
+| `/promise 1` | Show live tmux output for root promise #1 |
+| `/promise <name>` | Show live output by promise name |
+| `/promise stop` | Close the live output view |
+
+The live view uses `tmux capture-pane` to show the last 8 lines of the promise's output, updating every second.
 
 ### Process Cleanup
 
 - Cancel kills child process with `SIGTERM`
-- On pi shutdown (`session_shutdown`), all running/pending promises are automatically cancelled, child processes killed, and timers cleaned up — no orphaned processes left behind
-- Cancelled promises get status `cancelled` with reason `"pi exited — session ended"`
+- On pi shutdown (`session_shutdown`), timers are cleaned and state is saved for reload
+- Completed promises auto-clean their tmux sessions and temp files via `setPromise()`
+- No orphaned processes — sessions are detached and auto-cleaned on completion
 
 ---
 

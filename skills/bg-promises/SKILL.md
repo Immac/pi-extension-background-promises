@@ -448,12 +448,23 @@ See the [failure-recovery.md](examples/failure-recovery.md) example for the corr
 
 ## Behavior on pi shutdown
 
-When pi exits, the extension listens for `session_shutdown` and:
-- **Cancels** all running/pending promises (status: `cancelled`, reason: `"pi exited — session ended"`)
-- **Kills** all child processes with `SIGTERM`
-- **Clears** all progress polling timers
+On `session_shutdown` (pi exit or reload):
+- **Preserves** running promises — state is saved to `~/.pi/agent/promise-state.json`
+- **Clears** all progress polling timers (re-established on next load)
+- **Preserves** tmux sessions — they survive reload for reconnection
+- `childPid` is cleared (won't survive reload)
 
-No orphaned processes remain after pi closes.
+**On next load** (`session_start`):
+- **Restores** all promises from the state file
+- **Re-discovers** tmux sessions by matching session names
+- **Reconnects** completion polling, progress tracking, and status bar
+
+This means promises **survive reload**. You can reload pi, and running promises continue in the background with their tmux sessions intact.
+
+**On actual completion** (not shutdown):
+- Tmux session is killed
+- Temp files cleaned
+- Final state saved
 
 ## Related Tools
 
