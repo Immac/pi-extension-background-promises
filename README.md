@@ -198,6 +198,39 @@ new-env — COMPLETED
 
 This avoids manually re-creating the build command — `promise-rechain` copies the original command and attaches it to the new parent's chain.
 
+### 📈 Progress Tracking (`PROMISE_PROGRESS:N`)
+
+Commands can report live progress to the TUI footer by printing `PROMISE_PROGRESS:N` (where N is 0-100) to stdout. The promise manager detects these markers automatically and shows a live block progress bar:
+
+```
+[F4] ①→$[████] 85% "Processing step 85..."  ✓3
+```
+
+The progress bar features:
+- **Block bars** — four braille-width slots `[    ]` → `[████]` with fixed-width `⠀` padding
+- **Aging gradient** — completed bars fade `█→▓→▒→░` (newest → oldest)
+- **Smooth follow** — the active bar smoothly catches up to real progress at a limited speed
+- **Boundary snap** — crosses 25/50/75% thresholds cleanly
+- **Status message** — the last stdout line is shown in quotes, updating in real-time
+- **Auto-filtered** — `PROMISE_PROGRESS:N` lines are stripped from the final command output
+
+**Usage — add to any command:**
+
+```bash
+# In a loop
+for i in $(seq 0 100); do
+  echo "PROMISE_PROGRESS:$i"
+  heavy_step $i
+done
+
+# Final progress
+expensive_command && echo "PROMISE_PROGRESS:100"
+```
+
+No extra tool parameters needed. The detection happens automatically in both tmux and direct runners. Works with `stdbuf -oL` for real-time file flushing.
+
+**When not to use:** Short commands that finish in under a second don't benefit from progress tracking. Save it for long-running operations (downloads, builds, training, batch processing).
+
 ### 🔍 Chain Inspection (`promise-graph`)
 
 Inspect chain relationships without a full list:

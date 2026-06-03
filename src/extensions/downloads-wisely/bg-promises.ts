@@ -1540,7 +1540,7 @@ function registerTools(pi: ExtensionAPI): void {
     defineTool({
       name: "promise-create",
       label: "Promise Create",
-      description: "Start an async task in background. Returns immediately with a promise ID. You can continue working on other tasks while it runs. When the promise completes, you'll be automatically notified with the result. Supports chaining with 'then' parameter. Do NOT call promise-block-until-complete after this — the result auto-delivers.",
+      description: "Start an async task in background. Returns immediately with a promise ID. You can continue working on other tasks while it runs. When the promise completes, you'll be automatically notified with the result. Supports chaining with 'then' parameter. Do NOT call promise-block-until-complete after this — the result auto-delivers.\n\nProgress tracking: If the command can report progress, add \"echo PROMISE_PROGRESS:\$i\" to each iteration. The footer will show a live block bar instead of the default circle animation. PROMISE_PROGRESS lines are auto-filtered from the final result.",
       promptSnippet: "Start a background task and keep working — results auto-deliver",
       promptGuidelines: [
         "DEFAULT TO USING PROMISES. If a task takes more than a couple seconds, fire promise-create and keep working on other things.",

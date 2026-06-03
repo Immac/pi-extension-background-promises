@@ -204,6 +204,30 @@ Shows a detailed tree below the editor:
 Press F4 to collapse
 ```
 
+### Progress tracking (`PROMISE_PROGRESS:N`)
+
+**HIGHLY SUGGESTED** for long-running commands. Add progress markers to show a live block progress bar in the footer instead of the default circle animation:
+
+```bash
+for i in $(seq 0 100); do
+  echo "PROMISE_PROGRESS:$i"
+  heavy_step $i
+done
+```
+
+The footer shows:
+
+```
+[F4] ①→$[████] 85% "Processing..."  ✓3
+```
+
+- `[    ]` → `[████]` block bar fills as progress increases
+- Completed bars age: `█→▓→▒→░` (newest → oldest)
+- Last stdout line shown in quotes, updating in real-time
+- `PROMISE_PROGRESS:N` lines are **auto-filtered** from the final output result
+
+No extra tool parameters needed — just add the `echo` to your command.
+
 ---
 
 ## ⚠️ Avoiding Duplicate Work (Common Pitfall)
