@@ -72,8 +72,6 @@ interface BackgroundPromise {
   notified?: boolean;
   /** Progress 0-100 for tracked promises */
   progress?: number;
-  /** File-based progress configuration */
-  progressConfig?: { path: string };
   /** Last line of stdout — shown as status message in footer */
   statusMessage?: string;
 }
@@ -375,7 +373,7 @@ function _progressToBlocks(pct: number, _blink: boolean): string {
 
 /** Check if a promise has trackable progress. */
 function _hasProgress(promise: BackgroundPromise): boolean {
-  return !!(promise.progressConfig || (promise.type === "download" && promise.totalSize && promise.totalSize > 0));
+  return !!(promise.progress !== undefined || (promise.type === "download" && promise.totalSize && promise.totalSize > 0));
 }
 
 let _animFrame = 0;
@@ -1195,41 +1193,33 @@ exec bash
     promise.childPid = undefined; // tmux manages the process
     setPromise(promise);
 
-    // Start progress polling if configured
-    const progressTimer = promise.progressConfig
-      ? setInterval(() => {
-          const current = getPromise(promise.id);
-          if (!current || current.status !== "running") {
-            clearInterval(progressTimer!);
-            return;
-          }
-          try {
-            if (existsSync(current.progressConfig!.path)) {
-              const raw = readFileSync(current.progressConfig!.path, "utf-8").trim();
-              const val = parseInt(raw, 10);
-              if (!isNaN(val) && val >= 0 && val <= 100) {
-                current.progress = val;
-                setPromise(current);
-              }
-            }
-          } catch {}
-        }, 500)
-      : undefined;
-
-    // Poll the output file for the completion marker
+    // Poll the output file for completion marker, status messages, and progress
     const pollInterval = setInterval(() => {
       const current = getPromise(promise.id);
       if (!current || current.status === "cancelled") {
         clearInterval(pollInterval);
-        if (progressTimer) clearInterval(progressTimer);
         return;
       }
 
       try {
         if (existsSync(outFile)) {
           const content = readFileSync(outFile, "utf-8");
-          // Extract last line for status message
-          const lines = content.trim().split("\n").filter(l => l && !l.startsWith("---PROMISE-DONE") && !l.startsWith("\u2502"));
+
+          // Scan for progress markers: PROMISE_PROGRESS:N
+          const progressMatch = content.match(/PROMISE_PROGRESS:(\d+)/);
+          if (progressMatch) {
+            const val = parseInt(progressMatch[1], 10);
+            if (!isNaN(val) && val >= 0 && val <= 100) {
+              promise.progress = val;
+              setPromise(promise);
+            }
+          }
+
+          // Extract last non-marker line for status message
+          const lines = content.trim().split("\n").filter(l => {
+            const t = l.trim();
+            return t && !t.startsWith("---PROMISE-DONE") && !t.startsWith("PROMISE_PROGRESS") && !t.startsWith("\u2502");
+          });
           if (lines.length > 0) {
             const lastLine = lines[lines.length - 1].trim();
             if (lastLine.length > 0 && lastLine.length < 80) {
@@ -1237,12 +1227,14 @@ exec bash
               setPromise(promise);
             }
           }
-          if (/---PROMISE-DONE:\d+---/.test(content)) { // no $ anchor — file ends with \n from echo
+
+          if (/---PROMISE-DONE:\d+---/.test(content)) {
             clearInterval(pollInterval);
-            if (progressTimer) clearInterval(progressTimer);
             const exitCode = _readTmuxExitCode(promise.id);
             promise.status = exitCode === 0 ? "completed" : "failed";
-            promise.result = { output: _readTmuxOutput(promise.id) };
+            // Filter PROMISE_PROGRESS lines from final output
+            const rawOutput = _readTmuxOutput(promise.id);
+            promise.result = { output: rawOutput.replace(/PROMISE_PROGRESS:\d+[\s\n]*/g, "").trim() };
             if (exitCode !== 0 && exitCode !== undefined) {
               promise.error = `Command exited with code ${exitCode}`;
             }
@@ -1289,33 +1281,22 @@ function _runDirect(promise: BackgroundPromise): void {
 
     let output = "";
 
-    // Start progress polling if configured
-    const progressTimer = promise.progressConfig
-      ? setInterval(() => {
-          const current = getPromise(promise.id);
-          if (!current || current.status !== "running") {
-            clearInterval(progressTimer!);
-            return;
-          }
-          try {
-            if (existsSync(current.progressConfig!.path)) {
-              const raw = readFileSync(current.progressConfig!.path, "utf-8").trim();
-              const val = parseInt(raw, 10);
-              if (!isNaN(val) && val >= 0 && val <= 100) {
-                current.progress = val;
-                setPromise(current);
-              }
-            }
-          } catch {
-            // File may be temporarily locked
-          }
-        }, 500)
-      : undefined;
-
     proc.stdout?.on("data", (data: Buffer) => {
-      output += data.toString();
+      const chunk = data.toString();
+      // Scan for progress markers: PROMISE_PROGRESS:N
+      const progressMatch = chunk.match(/PROMISE_PROGRESS:(\d+)/);
+      if (progressMatch) {
+        const val = parseInt(progressMatch[1], 10);
+        if (!isNaN(val) && val >= 0 && val <= 100) {
+          promise.progress = val;
+          setPromise(promise);
+        }
+      }
+      // Keep non-progress lines in output (filter out PROGRESS markers)
+      const filtered = chunk.replace(/PROMISE_PROGRESS:\d+\n?/g, "").replace(/PROMISE_PROGRESS:\d+/g, "");
+      output += filtered;
       // Track last line for footer status
-      const lines = data.toString().trim().split("\n");
+      const lines = filtered.trim().split("\n");
       const lastLine = lines[lines.length - 1];
       if (lastLine && lastLine.length > 0 && lastLine.length < 80) {
         promise.statusMessage = lastLine.trim();
@@ -1329,7 +1310,6 @@ function _runDirect(promise: BackgroundPromise): void {
 
     new Promise<void>((resolve) => {
       proc.on("close", (code: number | null) => {
-        if (progressTimer) clearInterval(progressTimer);
         if (promise.status !== "cancelled") {
           if (code === 0) {
             promise.status = "completed";
@@ -1346,7 +1326,6 @@ function _runDirect(promise: BackgroundPromise): void {
       });
 
       proc.on("error", (err: Error) => {
-        if (progressTimer) clearInterval(progressTimer);
         if (promise.status !== "cancelled") {
           promise.status = "failed";
           promise.error = err.message;
@@ -1568,7 +1547,7 @@ function registerTools(pi: ExtensionAPI): void {
         "When a promise completion notification arrives, the result is ready to use. Act on it naturally — inspect the output, chain next steps, or report to the user.",
         "DEDUP: Use dedup=true + subject=... to avoid creating duplicate promises. If a promise with the same subject already exists (and hasn't failed), the existing promise's ID is returned instead of creating a new one.",
         "REPLACE: Use replace=true + subject=... to cancel an existing promise with the same subject and create a fresh one. This is the pattern for 're-run tests after code changes'.",
-        "PROGRESS: HIGHLY SUGGESTED — If a command can report progress by writing a number (0-100) to a file, add progress={path: '/tmp/progress.txt'}. The promise will show a live block progress bar in the footer instead of the default circle animation. The command just needs to echo its percentage (0-100) to that file periodically.",
+        "PROGRESS: HIGHLY SUGGESTED — If a command can report progress, add PROMISE_PROGRESS:N to your command (where N is 0-100). The promise will show a live block progress bar in the footer instead of the default circle animation. Example: `for i in \$(seq 0 100); do echo \"PROMISE_PROGRESS:\$i\"; \$COMMAND; done` — the PROGRESS: lines are automatically filtered from the final output.",
       ],
       parameters: Type.Object({
         download: Type.Optional(Type.String({ description: "URL to download" })),
@@ -1580,7 +1559,6 @@ function registerTools(pi: ExtensionAPI): void {
         subject: Type.Optional(Type.String({ description: "Semantic label for dedup/replace matching. Use with dedup=true to avoid duplicates, or replace=true to cancel-and-restart." })),
         dedup: Type.Optional(Type.Boolean({ description: "Skip creation if a promise with the same subject already exists (and hasn't failed). Returns the existing promise instead." })),
         replace: Type.Optional(Type.Boolean({ description: "Cancel any existing promise with the same subject before creating a new one. Use when re-running a task after changes." })),
-        progress: Type.Optional(Type.Object({ path: Type.String({ description: "Path to a file the command writes progress (0-100) to" }) })),
       }),
       async execute(_toolCallId: string, args: {
         download?: string;
@@ -1592,7 +1570,6 @@ function registerTools(pi: ExtensionAPI): void {
         subject?: string;
         dedup?: boolean;
         replace?: boolean;
-        progress?: { path: string };
       }, _signal?: AbortSignal): Promise<any> {
         // ---- Dedup / Replace: Check for existing promise with same subject ----
         if (args.subject) {
@@ -1684,7 +1661,6 @@ function registerTools(pi: ExtensionAPI): void {
           thenCommand: args.then,
           thenName: args.then ? `then-${name}` : undefined,
           thenCondition: args.then ? thenCondition : undefined,
-          progressConfig: args.progress ? { path: args.progress.path } : undefined,
           lastKnownSize: 0,
           createdAt: Date.now(),
         };
