@@ -74,6 +74,8 @@ interface BackgroundPromise {
   progress?: number;
   /** File-based progress configuration */
   progressConfig?: { path: string };
+  /** Last line of stdout — shown as status message in footer */
+  statusMessage?: string;
 }
 
 interface AwaitOptions {
@@ -420,11 +422,19 @@ function _chainCompact(root: BackgroundPromise, rootIndex: number, theme: any): 
         parts.push(theme.fg("text", `${rootIndex}\u2192`));
         parts.push(theme.fg(color, `${typeIcon}${bar}`));
         parts.push(theme.fg("accent", pctStr));
+        if (current.statusMessage) {
+          const msg = current.statusMessage.length > 20 ? current.statusMessage.slice(0, 17) + "..." : current.statusMessage;
+          parts.push(theme.fg("dim", ` "${msg}"`));
+        }
         isFirst = false;
       } else {
         parts.push(theme.fg("dim", "\u2192"));
         parts.push(theme.fg(color, `${typeIcon}${bar}`));
         parts.push(theme.fg("accent", pctStr));
+        if (current.statusMessage) {
+          const msg = current.statusMessage.length > 20 ? current.statusMessage.slice(0, 17) + "..." : current.statusMessage;
+          parts.push(theme.fg("dim", ` "${msg}"`));
+        }
       }
 
       current = current.thenPromiseId ? (promises.get(current.thenPromiseId) ?? undefined) : undefined;
@@ -443,10 +453,18 @@ function _chainCompact(root: BackgroundPromise, rootIndex: number, theme: any): 
     if (isFirst) {
       parts.push(theme.fg("text", `${rootIndex}\u2192`));
       parts.push(theme.fg(color, `${typeIcon}${glyph}${pctSuffix}`));
+      if (current.status === "running" && current.statusMessage) {
+        const msg = current.statusMessage.length > 20 ? current.statusMessage.slice(0, 17) + "..." : current.statusMessage;
+        parts.push(theme.fg("dim", ` "${msg}"`));
+      }
       isFirst = false;
     } else {
       parts.push(theme.fg("dim", "\u2192"));
       parts.push(theme.fg(color, `${typeIcon}${glyph}${pctSuffix}`));
+      if (current.status === "running" && current.statusMessage) {
+        const msg = current.statusMessage.length > 20 ? current.statusMessage.slice(0, 17) + "..." : current.statusMessage;
+        parts.push(theme.fg("dim", ` "${msg}"`));
+      }
     }
 
     current = current.thenPromiseId ? (promises.get(current.thenPromiseId) ?? undefined) : undefined;
@@ -526,6 +544,10 @@ function _expandedLine(
       line += ` ${theme.fg("dim", `(${promise.thenCondition})`)}`;
     }
     line += ` ${theme.fg("accent", pctStr)}`;
+    if (promise.statusMessage) {
+      const msg = promise.statusMessage.length > 30 ? promise.statusMessage.slice(0, 27) + "..." : promise.statusMessage;
+      line += ` ${theme.fg("dim", `\u201C${msg}\u201D`)}`;
+    }
     if (promise.type === "download" && promise.totalSize && promise.totalSize > 0) {
       const downloaded = (promise.lastKnownSize / 1024).toFixed(0);
       const total = (promise.totalSize / 1024).toFixed(0);
@@ -552,6 +574,10 @@ function _expandedLine(
     } else {
       const info = (promise.command || promise.url || "").slice(0, 50);
       if (info) line += ` ${theme.fg("muted", info)}`;
+    }
+    if (promise.status === "running" && promise.statusMessage) {
+      const msg = promise.statusMessage.length > 30 ? promise.statusMessage.slice(0, 27) + "..." : promise.statusMessage;
+      line += ` ${theme.fg("dim", `\u201C${msg}\u201D`)}`;
     }
   } else if (promise.status === "completed" && promise.result) {
     const r = JSON.stringify(promise.result);
@@ -1202,6 +1228,15 @@ exec bash
       try {
         if (existsSync(outFile)) {
           const content = readFileSync(outFile, "utf-8");
+          // Extract last line for status message
+          const lines = content.trim().split("\n").filter(l => l && !l.startsWith("---PROMISE-DONE") && !l.startsWith("\u2502"));
+          if (lines.length > 0) {
+            const lastLine = lines[lines.length - 1].trim();
+            if (lastLine.length > 0 && lastLine.length < 80) {
+              promise.statusMessage = lastLine;
+              setPromise(promise);
+            }
+          }
           if (/---PROMISE-DONE:\d+---/.test(content)) { // no $ anchor — file ends with \n from echo
             clearInterval(pollInterval);
             if (progressTimer) clearInterval(progressTimer);
@@ -1279,6 +1314,13 @@ function _runDirect(promise: BackgroundPromise): void {
 
     proc.stdout?.on("data", (data: Buffer) => {
       output += data.toString();
+      // Track last line for footer status
+      const lines = data.toString().trim().split("\n");
+      const lastLine = lines[lines.length - 1];
+      if (lastLine && lastLine.length > 0 && lastLine.length < 80) {
+        promise.statusMessage = lastLine.trim();
+        setPromise(promise);
+      }
     });
 
     proc.stderr?.on("data", (data: Buffer) => {
@@ -1526,7 +1568,7 @@ function registerTools(pi: ExtensionAPI): void {
         "When a promise completion notification arrives, the result is ready to use. Act on it naturally — inspect the output, chain next steps, or report to the user.",
         "DEDUP: Use dedup=true + subject=... to avoid creating duplicate promises. If a promise with the same subject already exists (and hasn't failed), the existing promise's ID is returned instead of creating a new one.",
         "REPLACE: Use replace=true + subject=... to cancel an existing promise with the same subject and create a fresh one. This is the pattern for 're-run tests after code changes'.",
-        "PROGRESS: If a command can report progress by writing a number (0-100) to a file, add progress={path: '/tmp/progress.txt'}. The promise will show a live block progress bar in the footer instead of the default circle animation. The command just needs to echo its percentage (0-100) to that file periodically.",
+        "PROGRESS: HIGHLY SUGGESTED — If a command can report progress by writing a number (0-100) to a file, add progress={path: '/tmp/progress.txt'}. The promise will show a live block progress bar in the footer instead of the default circle animation. The command just needs to echo its percentage (0-100) to that file periodically.",
       ],
       parameters: Type.Object({
         download: Type.Optional(Type.String({ description: "URL to download" })),
