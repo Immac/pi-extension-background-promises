@@ -70,6 +70,10 @@ interface BackgroundPromise {
   childPid?: number;
   /** Prevent duplicate notification */
   notified?: boolean;
+  /** Progress 0-100 for tracked promises */
+  progress?: number;
+  /** File-based progress configuration */
+  progressConfig?: { path: string };
 }
 
 interface AwaitOptions {
@@ -298,6 +302,94 @@ const _STATUS_COLOR: Record<string, string> = {
   cancelled: "dim",
 };
 
+/** Halves sweep around the circle — same size throughout.
+ * Running and pending differentiated by color (accent vs muted). */
+const _ANIM_FRAMES = ["\u25D3", "\u25D1", "\u25D2", "\u25D0"];
+
+// =============================================================================
+// Block Progress Bars
+// =============================================================================
+
+/** Block fill levels: empty, ▁(1/4), ▃(1/2), ▆(3/4), █(full) */
+const _BLOCK_BAR = ["\u2800", "\u2581", "\u2583", "\u2586", "\u2588"];
+
+/** Blink-off index for each block level (null = can't blink). */
+const _BLOCK_BLINK: (number | null)[] = [null, 0, 1, 2, 3];
+
+/** Aging shades: just-aged → medium-aged → oldest */
+const _BLOCK_SHADES = ["\u2593", "\u2592", "\u2591"];
+
+/** Extra fill characters for smooth animation: ▁▂▃▄▅▆▇█ */
+const _FILL_CHARS = ["\u2581", "\u2582", "\u2583", "\u2584", "\u2585", "\u2586", "\u2587", "\u2588"];
+
+let _animBlink = false;
+let _animDisplayLevel = 0;
+let _lastPartialLevel = 0;
+const _ANIM_VELOCITY = 0.4;
+
+/** Convert a progress percentage (0-100) to a 4-block progress bar string. */
+function _progressToBlocks(pct: number, _blink: boolean): string {
+  const totalSteps = 16;
+  const step = Math.min(Math.max(Math.round(pct / 100 * totalSteps), 0), totalSteps);
+  const fullBars = Math.floor(step / 4);
+  const partialLevel = step % 4;
+
+  // Smoothly follow the real partialLevel at a limited speed.
+  // At boundaries (completed bar), snap to 0 immediately instead of ramping down.
+  if (_lastPartialLevel > 0 && partialLevel === 0) {
+    _animDisplayLevel = 0;
+  }
+  _lastPartialLevel = partialLevel;
+
+  const diff = partialLevel - _animDisplayLevel;
+  if (Math.abs(diff) > 0.005) {
+    _animDisplayLevel += Math.sign(diff) * Math.min(Math.abs(diff), _ANIM_VELOCITY);
+  } else {
+    _animDisplayLevel = partialLevel;
+  }
+  const animLevel = Math.max(_animDisplayLevel, 0);
+
+  const bars: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    if (i < fullBars) {
+      const age = (fullBars - 1 - i) - 1;
+      bars.push(age < 0 ? _BLOCK_BAR[4] : _BLOCK_SHADES[Math.min(age, _BLOCK_SHADES.length - 1)]);
+    } else if (i === fullBars) {
+      if (animLevel > 0.01) {
+        const smoothIdx = Math.min(
+          Math.round((animLevel / 4) * (_FILL_CHARS.length - 1)),
+          _FILL_CHARS.length - 1
+        );
+        bars.push(_FILL_CHARS[smoothIdx]);
+      } else {
+        bars.push("\u2800");
+      }
+    } else {
+      bars.push("\u2800");
+    }
+  }
+  return "[" + bars.join("") + "]";
+}
+
+/** Check if a promise has trackable progress. */
+function _hasProgress(promise: BackgroundPromise): boolean {
+  return !!(promise.progressConfig || (promise.type === "download" && promise.totalSize && promise.totalSize > 0));
+}
+
+let _animFrame = 0;
+let _animTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Returns an animated glyph for running/pending promises, or the static
+ * glyph for completed/failed/cancelled.
+ */
+function _statusGlyph(status: string): string {
+  if (status === "running" || status === "pending") {
+    return _ANIM_FRAMES[_animFrame % _ANIM_FRAMES.length];
+  }
+  return _STATUS_GLYPH[status] || "?";
+}
+
 function _progressBar(pct: number, width = 8): string {
   const filled = Math.round((pct / 100) * width);
   return "\u2588".repeat(filled) + "\u2592".repeat(width - filled);
@@ -314,8 +406,32 @@ function _chainCompact(root: BackgroundPromise, rootIndex: number, theme: any): 
 
   while (current) {
     const typeIcon = current.type === "download" ? "\u2193" : "$";
-    const glyph = _STATUS_GLYPH[current.status] || "?";
     const color = _STATUS_COLOR[current.status] || "muted";
+
+    // Show braille progress bar for promises with trackable progress
+    if (current.status === "running" && _hasProgress(current)) {
+      const pct = current.progress ?? (current.totalSize
+        ? Math.round((current.lastKnownSize / current.totalSize) * 100)
+        : 0);
+      const bar = _progressToBlocks(pct, _animBlink);
+      const pctStr = ` ${Math.min(pct, 99)}%`;
+
+      if (isFirst) {
+        parts.push(theme.fg("text", `${rootIndex}\u2192`));
+        parts.push(theme.fg(color, `${typeIcon}${bar}`));
+        parts.push(theme.fg("accent", pctStr));
+        isFirst = false;
+      } else {
+        parts.push(theme.fg("dim", "\u2192"));
+        parts.push(theme.fg(color, `${typeIcon}${bar}`));
+        parts.push(theme.fg("accent", pctStr));
+      }
+
+      current = current.thenPromiseId ? (promises.get(current.thenPromiseId) ?? undefined) : undefined;
+      continue;
+    }
+
+    const glyph = _statusGlyph(current.status);
 
     // For running downloads with known total, show percentage suffix
     let pctSuffix = "";
@@ -351,8 +467,8 @@ function _getCompactStatus(theme: any): string | undefined {
 
   // Aggregate summary (always shown)
   const aggParts: string[] = [];
-  if (running > 0) aggParts.push(theme.fg("accent", `\u25CF${running}`));
-  if (pending > 0) aggParts.push(theme.fg("muted", `\u25CB${pending}`));
+  if (running > 0) aggParts.push(theme.fg("accent", `${_statusGlyph("running")}${running}`));
+  if (pending > 0) aggParts.push(theme.fg("muted", `${_statusGlyph("pending")}${pending}`));
   if (completed > 0) aggParts.push(theme.fg("success", `\u2713${completed}`));
   if (failed > 0) aggParts.push(theme.fg("error", `\u2717${failed}`));
 
@@ -393,11 +509,32 @@ function _expandedLine(
   depth: number,
   isLast: boolean
 ): string {
-  const glyph = _STATUS_GLYPH[promise.status] || "?";
   const color = _STATUS_COLOR[promise.status] || "muted";
   const typeIcon = promise.type === "download" ? "\u2193" : "$";
 
   const indent = depth === 0 ? " " : "  " + "\u2502  ".repeat(depth - 1) + (isLast ? "\u2514\u2500" : "\u251C\u2500");
+
+  // Show braille progress bar for promises with trackable progress
+  if (promise.status === "running" && _hasProgress(promise)) {
+    const pct = promise.progress ?? (promise.totalSize
+      ? Math.round((promise.lastKnownSize / promise.totalSize) * 100)
+      : 0);
+    const bar = _progressToBlocks(pct, _animBlink);
+    const pctStr = `${Math.min(pct, 99)}%`;
+    let line = `${indent}${theme.fg(color, bar)} ${theme.fg("dim", typeIcon)} ${theme.fg("text", promise.name)}`;
+    if (promise.thenCondition && depth > 0) {
+      line += ` ${theme.fg("dim", `(${promise.thenCondition})`)}`;
+    }
+    line += ` ${theme.fg("accent", pctStr)}`;
+    if (promise.type === "download" && promise.totalSize && promise.totalSize > 0) {
+      const downloaded = (promise.lastKnownSize / 1024).toFixed(0);
+      const total = (promise.totalSize / 1024).toFixed(0);
+      line += ` ${theme.fg("muted", `(${downloaded}KB/${total}KB)`)}`;
+    }
+    return line;
+  }
+
+  const glyph = _statusGlyph(promise.status);
 
   let line = `${indent}${theme.fg(color, glyph)} ${theme.fg("dim", typeIcon)} ${theme.fg("text", promise.name)}`;
 
@@ -511,6 +648,52 @@ function _updateStatusBar(ctx?: { ui: any; theme: any }): void {
     } catch {
       // UI may not be fully initialized
     }
+  }
+
+  // Manage animation timer — runs while any promise is running or pending
+  if (_hasActivePromises()) {
+    _startAnimTimer();
+  } else {
+    _stopAnimTimer();
+    _animFrame = 0;
+  }
+}
+
+// =============================================================================
+// Animation Timer
+// =============================================================================
+
+function _hasActivePromises(): boolean {
+  for (const [, p] of promises) {
+    if (p.status === "running" || p.status === "pending") return true;
+  }
+  return false;
+}
+
+function _startAnimTimer(): void {
+  if (_animTimer) return;
+  _animTimer = setInterval(() => {
+    if (!_hasActivePromises()) {
+      _stopAnimTimer();
+      return;
+    }
+    _animFrame++;
+    _animBlink = !_animBlink;
+    // Lightweight: only update compact footer, not the expanded widget
+    if (!_statusBarCtx) return;
+    const { ui, theme } = _statusBarCtx;
+    try {
+      ui.setStatus("bg-promises", _getCompactStatus(theme));
+    } catch {
+      // UI may not be fully initialized
+    }
+  }, 120);
+}
+
+function _stopAnimTimer(): void {
+  if (_animTimer) {
+    clearInterval(_animTimer);
+    _animTimer = null;
   }
 }
 
@@ -651,6 +834,9 @@ async function runDownload(promise: BackgroundPromise): Promise<void> {
         fileStream.write(Buffer.from(value));
         bytesDownloaded += value.length;
         promise.lastKnownSize = bytesDownloaded;
+        if (promise.totalSize && promise.totalSize > 0) {
+          promise.progress = Math.round((bytesDownloaded / promise.totalSize) * 100);
+        }
         setPromise(promise);
 
         // Check for external cancellation (promise-cancel or replace)
@@ -983,11 +1169,33 @@ exec bash
     promise.childPid = undefined; // tmux manages the process
     setPromise(promise);
 
+    // Start progress polling if configured
+    const progressTimer = promise.progressConfig
+      ? setInterval(() => {
+          const current = getPromise(promise.id);
+          if (!current || current.status !== "running") {
+            clearInterval(progressTimer!);
+            return;
+          }
+          try {
+            if (existsSync(current.progressConfig!.path)) {
+              const raw = readFileSync(current.progressConfig!.path, "utf-8").trim();
+              const val = parseInt(raw, 10);
+              if (!isNaN(val) && val >= 0 && val <= 100) {
+                current.progress = val;
+                setPromise(current);
+              }
+            }
+          } catch {}
+        }, 500)
+      : undefined;
+
     // Poll the output file for the completion marker
     const pollInterval = setInterval(() => {
       const current = getPromise(promise.id);
       if (!current || current.status === "cancelled") {
         clearInterval(pollInterval);
+        if (progressTimer) clearInterval(progressTimer);
         return;
       }
 
@@ -996,6 +1204,7 @@ exec bash
           const content = readFileSync(outFile, "utf-8");
           if (/---PROMISE-DONE:\d+---/.test(content)) { // no $ anchor — file ends with \n from echo
             clearInterval(pollInterval);
+            if (progressTimer) clearInterval(progressTimer);
             const exitCode = _readTmuxExitCode(promise.id);
             promise.status = exitCode === 0 ? "completed" : "failed";
             promise.result = { output: _readTmuxOutput(promise.id) };
@@ -1045,6 +1254,29 @@ function _runDirect(promise: BackgroundPromise): void {
 
     let output = "";
 
+    // Start progress polling if configured
+    const progressTimer = promise.progressConfig
+      ? setInterval(() => {
+          const current = getPromise(promise.id);
+          if (!current || current.status !== "running") {
+            clearInterval(progressTimer!);
+            return;
+          }
+          try {
+            if (existsSync(current.progressConfig!.path)) {
+              const raw = readFileSync(current.progressConfig!.path, "utf-8").trim();
+              const val = parseInt(raw, 10);
+              if (!isNaN(val) && val >= 0 && val <= 100) {
+                current.progress = val;
+                setPromise(current);
+              }
+            }
+          } catch {
+            // File may be temporarily locked
+          }
+        }, 500)
+      : undefined;
+
     proc.stdout?.on("data", (data: Buffer) => {
       output += data.toString();
     });
@@ -1055,6 +1287,7 @@ function _runDirect(promise: BackgroundPromise): void {
 
     new Promise<void>((resolve) => {
       proc.on("close", (code: number | null) => {
+        if (progressTimer) clearInterval(progressTimer);
         if (promise.status !== "cancelled") {
           if (code === 0) {
             promise.status = "completed";
@@ -1071,6 +1304,7 @@ function _runDirect(promise: BackgroundPromise): void {
       });
 
       proc.on("error", (err: Error) => {
+        if (progressTimer) clearInterval(progressTimer);
         if (promise.status !== "cancelled") {
           promise.status = "failed";
           promise.error = err.message;
@@ -1303,6 +1537,7 @@ function registerTools(pi: ExtensionAPI): void {
         subject: Type.Optional(Type.String({ description: "Semantic label for dedup/replace matching. Use with dedup=true to avoid duplicates, or replace=true to cancel-and-restart." })),
         dedup: Type.Optional(Type.Boolean({ description: "Skip creation if a promise with the same subject already exists (and hasn't failed). Returns the existing promise instead." })),
         replace: Type.Optional(Type.Boolean({ description: "Cancel any existing promise with the same subject before creating a new one. Use when re-running a task after changes." })),
+        progress: Type.Optional(Type.Object({ path: Type.String({ description: "Path to a file the command writes progress (0-100) to" }) })),
       }),
       async execute(_toolCallId: string, args: {
         download?: string;
@@ -1314,6 +1549,7 @@ function registerTools(pi: ExtensionAPI): void {
         subject?: string;
         dedup?: boolean;
         replace?: boolean;
+        progress?: { path: string };
       }, _signal?: AbortSignal): Promise<any> {
         // ---- Dedup / Replace: Check for existing promise with same subject ----
         if (args.subject) {
@@ -1405,6 +1641,7 @@ function registerTools(pi: ExtensionAPI): void {
           thenCommand: args.then,
           thenName: args.then ? `then-${name}` : undefined,
           thenCondition: args.then ? thenCondition : undefined,
+          progressConfig: args.progress ? { path: args.progress.path } : undefined,
           lastKnownSize: 0,
           createdAt: Date.now(),
         };
