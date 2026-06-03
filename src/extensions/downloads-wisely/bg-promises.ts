@@ -1526,6 +1526,7 @@ function registerTools(pi: ExtensionAPI): void {
         "When a promise completion notification arrives, the result is ready to use. Act on it naturally — inspect the output, chain next steps, or report to the user.",
         "DEDUP: Use dedup=true + subject=... to avoid creating duplicate promises. If a promise with the same subject already exists (and hasn't failed), the existing promise's ID is returned instead of creating a new one.",
         "REPLACE: Use replace=true + subject=... to cancel an existing promise with the same subject and create a fresh one. This is the pattern for 're-run tests after code changes'.",
+        "PROGRESS: If a command can report progress by writing a number (0-100) to a file, add progress={path: '/tmp/progress.txt'}. The promise will show a live block progress bar in the footer instead of the default circle animation. The command just needs to echo its percentage (0-100) to that file periodically.",
       ],
       parameters: Type.Object({
         download: Type.Optional(Type.String({ description: "URL to download" })),
