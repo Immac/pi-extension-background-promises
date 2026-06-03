@@ -30,7 +30,7 @@
 import { spawn, execSync } from "node:child_process";
 import { createWriteStream, writeFileSync, unlinkSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -105,6 +105,12 @@ function getPromise(id: string): BackgroundPromise | undefined {
 
 function setPromise(promise: BackgroundPromise): void {
   promises.set(promise.id, promise);
+  // Auto-cleanup tmux session and temp files on terminal states
+  if (promise.status === "completed" || promise.status === "failed" || promise.status === "cancelled") {
+    _killTmuxSession(promise.id);
+    _cleanupTempFiles(promise.id);
+  }
+  _saveState();
 }
 
 /**
@@ -116,6 +122,113 @@ function findPromiseBySubject(subject: string): BackgroundPromise | undefined {
     if (p.subject === subject) return p;
   }
   return undefined;
+}
+
+// =============================================================================
+// State Persistence — survive reloads
+// =============================================================================
+
+const _STATE_FILE = join(process.env.HOME || "/tmp", ".pi", "agent", "promise-state.json");
+
+/** Serialize and save the promise map to disk. */
+function _saveState(): void {
+  try {
+    const data = Array.from(promises.entries()).map(([, p]) => ({
+      id: p.id,
+      name: p.name,
+      subject: p.subject,
+      type: p.type,
+      status: p.status,
+      targetPath: p.targetPath,
+      url: p.url,
+      command: p.command,
+      thenCommand: p.thenCommand,
+      thenDownload: p.thenDownload,
+      thenPath: p.thenPath,
+      thenName: p.thenName,
+      thenCondition: p.thenCondition,
+      thenSubject: p.thenSubject,
+      thenPromiseId: p.thenPromiseId,
+      lastKnownSize: p.lastKnownSize,
+      totalSize: p.totalSize,
+      result: p.result,
+      previousResult: p.previousResult,
+      error: p.error,
+      createdAt: p.createdAt,
+      completedAt: p.completedAt,
+      progress: p.progress,
+      statusMessage: p.statusMessage,
+      notified: p.notified,
+    }));
+    mkdirSync(dirname(_STATE_FILE), { recursive: true });
+    writeFileSync(_STATE_FILE, JSON.stringify(data, null, 2), "utf-8");
+  } catch {}
+}
+
+/** Load and restore the promise map from disk on startup, then re-establish tracking. */
+function _loadState(): void {
+  try {
+    if (!existsSync(_STATE_FILE)) return;
+    const data = JSON.parse(readFileSync(_STATE_FILE, "utf-8")) as any[];
+    for (const item of data) {
+      const p: BackgroundPromise = {
+        id: item.id,
+        name: item.name,
+        subject: item.subject,
+        type: item.type,
+        status: item.status,
+        targetPath: item.targetPath,
+        url: item.url,
+        command: item.command,
+        thenCommand: item.thenCommand,
+        thenDownload: item.thenDownload,
+        thenPath: item.thenPath,
+        thenName: item.thenName,
+        thenCondition: item.thenCondition,
+        thenSubject: item.thenSubject,
+        thenPromiseId: item.thenPromiseId,
+        lastKnownSize: item.lastKnownSize ?? 0,
+        totalSize: item.totalSize,
+        result: item.result,
+        previousResult: item.previousResult,
+        error: item.error,
+        createdAt: item.createdAt,
+        completedAt: item.completedAt,
+        childPid: undefined, // cleared on reload — process is gone
+        progress: item.progress,
+        statusMessage: item.statusMessage,
+        notified: item.notified,
+      };
+      promises.set(p.id, p);
+      // Re-establish tmux polling for running promises
+      if (p.status === "running" || p.status === "pending") {
+        _resumePromiseTracking(p);
+      }
+    }
+  } catch {}
+}
+
+/** After reload, re-discover a promise's tmux session and restart completion polling. */
+function _resumePromiseTracking(promise: BackgroundPromise): void {
+  try {
+    // Find the tmux session by matching suffix against the promise ID
+    const output = execSync(`tmux list-sessions -F "#S" 2>/dev/null`, { stdio: "pipe", encoding: "utf-8", timeout: 3000 });
+    const lines = output.trim().split("\n");
+    for (const line of lines) {
+      if (line.endsWith(`-${promise.id}`)) {
+        // Re-discovered: track it and restart polling for tmux-based promises
+        _tmuxSessions.set(promise.id, line);
+        _startTmuxPolling(promise);
+        break;
+      }
+    }
+  } catch {}
+}
+
+/** Clean up temp files for a completed promise. */
+function _cleanupTempFiles(promiseId: string): void {
+  try { unlinkSync(`/tmp/promise-${promiseId}.out`); } catch {}
+  try { unlinkSync(`/tmp/promise-${promiseId}.sh`); } catch {}
 }
 
 // =============================================================================
@@ -1076,6 +1189,25 @@ const _instanceId = Date.now().toString(36) + Math.random().toString(36).slice(2
 
 const _tmuxSessions = new Map<string, string>();
 
+/** Current tmux session name (if running inside tmux), sanitized for use in session names. */
+let _currentTmuxSession: string | null = null;
+
+function _getCurrentTmuxSession(): string | undefined {
+  if (_currentTmuxSession !== null) return _currentTmuxSession || undefined;
+  if (!process.env.TMUX) {
+    _currentTmuxSession = "";
+    return undefined;
+  }
+  try {
+    const raw = execSync("tmux display-message -p '#{session_name}' 2>/dev/null", { stdio: "pipe", encoding: "utf-8", timeout: 2000 }).trim();
+    // Sanitize to alphanumeric + hyphens only for safe use in shell commands
+    _currentTmuxSession = raw.replace(/[^a-zA-Z0-9\-]/g, "-") || "";
+  } catch {
+    _currentTmuxSession = "";
+  }
+  return _currentTmuxSession || undefined;
+}
+
 /**
  * Check if we're inside a tmux session and tmux binary is available.
  */
@@ -1095,24 +1227,30 @@ function _isTmuxAvailable(): boolean {
  * Sanitize a string for use as a tmux session name — alphanumeric + hyphens only.
  */
 function _toTmuxName(promise: BackgroundPromise): string {
-  const prefix = `promise-${_instanceId}-`;
+  const parentSession = _getCurrentTmuxSession();
+  const prefix = parentSession
+    ? `promise-${parentSession}-${_instanceId}-`
+    : `promise-${_instanceId}-`;
   const maxTotal = 64;
   const sanitized = promise.id.replace(/[^a-zA-Z0-9\-]/g, "-");
   const available = maxTotal - prefix.length;
   return prefix + sanitized.slice(0, Math.max(available, 0));
 }
 
-/**
- * Kill a tmux session by promise ID. Called on cancel/shutdown.
- */
+/** Kill a tmux session by promise ID. Called on cancel/shutdown. */
 /** Kill all orphaned promise tmux sessions — sessions from previous pi loads
- * that were never cleaned up. Called on startup to prevent accumulation. */
+ * that were never cleaned up. Called on startup and shutdown. */
 function _killOrphanedTmuxSessions(): void {
   try {
+    const parentSession = _getCurrentTmuxSession();
+    // Scope cleanup to this tmux session only — other sessions' promises untouched
+    const orphanPrefix = parentSession
+      ? `promise-${parentSession}-`
+      : `promise-`;
     const output = execSync(`tmux list-sessions -F "#S" 2>/dev/null`, { stdio: "pipe", encoding: "utf-8", timeout: 3000 });
     const lines = output.trim().split("\n");
     for (const line of lines) {
-      if (line.startsWith("promise-")) {
+      if (line.startsWith(orphanPrefix)) {
         try {
           execSync(`tmux kill-session -t "${line}" 2>/dev/null`, { stdio: "ignore" });
         } catch {}
@@ -1121,6 +1259,13 @@ function _killOrphanedTmuxSessions(): void {
   } catch {
     // tmux may not be available
   }
+}
+
+/** Mark a promise as completed/failed/cancelled and clean up resources. */
+function _finalizePromise(promise: BackgroundPromise): void {
+  _killTmuxSession(promise.id);
+  _cleanupTempFiles(promise.id);
+  setPromise(promise);
 }
 
 function _killTmuxSession(promiseId: string): void {
@@ -1215,64 +1360,8 @@ exec bash
     promise.childPid = undefined; // tmux manages the process
     setPromise(promise);
 
-    // Poll the output file for completion marker, status messages, and progress
-    const pollInterval = setInterval(() => {
-      const current = getPromise(promise.id);
-      if (!current || current.status === "cancelled") {
-        clearInterval(pollInterval);
-        return;
-      }
-
-      try {
-        if (existsSync(outFile)) {
-          const content = readFileSync(outFile, "utf-8");
-
-          // Scan for progress markers: PROMISE_PROGRESS:N
-          // Use matchAll + last match to get the latest progress value
-          const progressRegex = /PROMISE_PROGRESS:(\d+)/g;
-          let progressMatch: RegExpExecArray | null;
-          let lastProgressVal: number | undefined;
-          while ((progressMatch = progressRegex.exec(content)) !== null) {
-            lastProgressVal = parseInt(progressMatch[1], 10);
-          }
-          if (lastProgressVal !== undefined && !isNaN(lastProgressVal) && lastProgressVal >= 0 && lastProgressVal <= 100) {
-            promise.progress = lastProgressVal;
-            setPromise(promise);
-          }
-
-          // Extract last non-marker line for status message
-          const lines = content.trim().split("\n").filter(l => {
-            const t = l.trim();
-            return t && !t.startsWith("---PROMISE-DONE") && !t.startsWith("PROMISE_PROGRESS") && !t.startsWith("\u2502");
-          });
-          if (lines.length > 0) {
-            const lastLine = lines[lines.length - 1].trim();
-            if (lastLine.length > 0 && lastLine.length < 80) {
-              promise.statusMessage = lastLine;
-              setPromise(promise);
-            }
-          }
-
-          if (/---PROMISE-DONE:\d+---/.test(content)) {
-            clearInterval(pollInterval);
-            const exitCode = _readTmuxExitCode(promise.id);
-            promise.status = exitCode === 0 ? "completed" : "failed";
-            // Filter PROMISE_PROGRESS lines from final output
-            const rawOutput = _readTmuxOutput(promise.id);
-            promise.result = { output: rawOutput.replace(/PROMISE_PROGRESS:\d+[\s\n]*/g, "").trim() };
-            if (exitCode !== 0 && exitCode !== undefined) {
-              promise.error = `Command exited with code ${exitCode}`;
-            }
-            promise.completedAt = Date.now();
-            setPromise(promise);
-            _updateStatusBar();
-            runChainedPromise(promise);
-          }
-        }
-      } catch {
-        // File may be temporarily locked
-      }
-    }, 500);
+    // Start polling for completion, progress, and status messages
+    _startTmuxPolling(promise);
 
     _updateStatusBar();
   } catch (err) {
@@ -1281,6 +1370,69 @@ exec bash
     try { unlinkSync(scriptFile); } catch {}
     _runDirect(promise);
   }
+}
+
+/** Start polling a running tmux promise for completion, progress, and status. */
+function _startTmuxPolling(promise: BackgroundPromise): void {
+  const sessionName = _tmuxSessions.get(promise.id);
+  if (!sessionName) return;
+  const outFile = `/tmp/promise-${promise.id}.out`;
+
+  const pollInterval = setInterval(() => {
+    const current = getPromise(promise.id);
+    if (!current || current.status === "cancelled") {
+      clearInterval(pollInterval);
+      return;
+    }
+
+    try {
+      if (existsSync(outFile)) {
+        const content = readFileSync(outFile, "utf-8");
+
+        // Scan for progress markers: PROMISE_PROGRESS:N
+        const progressRegex = /PROMISE_PROGRESS:(\d+)/g;
+        let progressMatch: RegExpExecArray | null;
+        let lastProgressVal: number | undefined;
+        while ((progressMatch = progressRegex.exec(content)) !== null) {
+          lastProgressVal = parseInt(progressMatch[1], 10);
+        }
+        if (lastProgressVal !== undefined && !isNaN(lastProgressVal) && lastProgressVal >= 0 && lastProgressVal <= 100) {
+          promise.progress = lastProgressVal;
+          setPromise(promise);
+        }
+
+        // Extract last non-marker line for status message
+        const lines = content.trim().split("\n").filter(l => {
+          const t = l.trim();
+          return t && !t.startsWith("---PROMISE-DONE") && !t.startsWith("PROMISE_PROGRESS") && !t.startsWith("\u2502");
+        });
+        if (lines.length > 0) {
+          const lastLine = lines[lines.length - 1].trim();
+          if (lastLine.length > 0 && lastLine.length < 80) {
+            promise.statusMessage = lastLine;
+            setPromise(promise);
+          }
+        }
+
+        if (/---PROMISE-DONE:\d+---/.test(content)) {
+          clearInterval(pollInterval);
+          const exitCode = _readTmuxExitCode(promise.id);
+          promise.status = exitCode === 0 ? "completed" : "failed";
+          const rawOutput = _readTmuxOutput(promise.id);
+          promise.result = { output: rawOutput.replace(/PROMISE_PROGRESS:\d+[\s\n]*/g, "").trim() };
+          if (exitCode !== 0 && exitCode !== undefined) {
+            promise.error = `Command exited with code ${exitCode}`;
+          }
+          promise.completedAt = Date.now();
+          setPromise(promise);
+          _updateStatusBar();
+          runChainedPromise(promise);
+        }
+      }
+    } catch {
+      // File may be temporarily locked
+    }
+  }, 500);
 }
 
 /**
@@ -1412,7 +1564,9 @@ function cancelAllPromises(): void {
       setPromise(promise);
     }
   }
-  // Kill any orphaned tmux sessions not in the tracked map
+  // Persist the updated state
+  _saveState();
+  // Clean any remaining orphaned sessions from this tmux session
   _killOrphanedTmuxSessions();
 }
 
@@ -1524,7 +1678,7 @@ function registerTools(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     sessionCtx = { ui: ctx.ui, theme: ctx.ui.theme };
-    _killOrphanedTmuxSessions();
+    _loadState();
     _updateStatusBar(sessionCtx);
   });
 
