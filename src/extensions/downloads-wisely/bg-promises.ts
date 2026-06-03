@@ -130,10 +130,12 @@ function findPromiseBySubject(subject: string): BackgroundPromise | undefined {
 
 const _STATE_FILE = join(process.env.HOME || "/tmp", ".pi", "agent", "promise-state.json");
 
-/** Serialize and save the promise map to disk. */
+/** Serialize and save the promise map to disk — only running/pending promises. */
 function _saveState(): void {
   try {
-    const data = Array.from(promises.entries()).map(([, p]) => ({
+    const data = Array.from(promises.entries())
+      .filter(([, p]) => p.status === "running" || p.status === "pending")
+      .map(([, p]) => ({
       id: p.id,
       name: p.name,
       subject: p.subject,
@@ -211,18 +213,44 @@ function _loadState(): void {
 /** After reload, re-discover a promise's tmux session and restart completion polling. */
 function _resumePromiseTracking(promise: BackgroundPromise): void {
   try {
-    // Find the tmux session by matching suffix against the promise ID
     const output = execSync(`tmux list-sessions -F "#S" 2>/dev/null`, { stdio: "pipe", encoding: "utf-8", timeout: 3000 });
     const lines = output.trim().split("\n");
     for (const line of lines) {
       if (line.endsWith(`-${promise.id}`)) {
-        // Re-discovered: track it and restart polling for tmux-based promises
         _tmuxSessions.set(promise.id, line);
         _startTmuxPolling(promise);
-        break;
+        return;
       }
     }
   } catch {}
+
+  // Tmux session not found — check if the output file has a completion marker
+  // This handles the case where the command finished during shutdown
+  const outFile = `/tmp/promise-${promise.id}.out`;
+  try {
+    if (existsSync(outFile)) {
+      const content = readFileSync(outFile, "utf-8");
+      const match = content.match(/---PROMISE-DONE:(\d+)---/);
+      if (match) {
+        const exitCode = parseInt(match[1], 10);
+        const rawOutput = content.replace(/---PROMISE-DONE:\d+---[\s\S]*$/, "").replace(/PROMISE_PROGRESS:\d+[\s\n]*/g, "").trim();
+        promise.status = exitCode === 0 ? "completed" : "failed";
+        promise.result = { output: rawOutput };
+        if (exitCode !== 0) promise.error = `Command exited with code ${exitCode}`;
+        promise.completedAt = Date.now();
+        setPromise(promise);
+        _cleanupTempFiles(promise.id);
+        return;
+      }
+    }
+  } catch {}
+
+  // Nothing found — mark as failed (connection lost during reload)
+  promise.status = "failed";
+  promise.error = "Tmux session lost during pi reload — results not recovered";
+  promise.completedAt = Date.now();
+  setPromise(promise);
+  _cleanupTempFiles(promise.id);
 }
 
 /** Clean up temp files for a completed promise. */
@@ -1672,6 +1700,9 @@ function registerTools(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     sessionCtx = { ui: ctx.ui, theme: ctx.ui.theme };
     _loadState();
+    // Delete state file after loading — it's only needed to survive reload
+    // during a single pi session. Fresh starts should start clean.
+    try { unlinkSync(_STATE_FILE); } catch {}
     _updateStatusBar(sessionCtx);
   });
 
