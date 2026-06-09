@@ -28,7 +28,6 @@
 
 import { spawn, execSync } from "node:child_process";
 import { createWriteStream, writeFileSync, unlinkSync, readFileSync, existsSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
 import { Type } from "typebox";
