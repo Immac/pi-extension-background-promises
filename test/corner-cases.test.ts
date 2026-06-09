@@ -81,7 +81,6 @@ async function main() {
   extModule.default(pi as any);
 
   const createTool = pi.tools.find((t) => t.name === "promise-create")!;
-  const awaitTool = pi.tools.find((t) => t.name === "promise-block-until-complete")!;
   const listTool = pi.tools.find((t) => t.name === "promises-list")!;
   const statusTool = pi.tools.find((t) => t.name === "promise-status")!;
   const cancelTool = pi.tools.find((t) => t.name === "promise-cancel")!;
@@ -89,7 +88,7 @@ async function main() {
   const rechainTool = pi.tools.find((t) => t.name === "promise-rechain")!;
   const graphTool = pi.tools.find((t) => t.name === "promise-graph")!;
 
-  const required = [createTool, awaitTool, listTool, statusTool, cancelTool, thenTool, rechainTool, graphTool];
+  const required = [createTool, listTool, statusTool, cancelTool, thenTool, rechainTool, graphTool];
   if (required.some((t) => !t)) throw new Error("Some tools not registered");
 
   console.log("Tools registered:", pi.tools.map((t) => t.name));
@@ -186,63 +185,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 3: promise-await — edge cases
+  // SECTION 3: promise-status — edge cases
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 3: promise-await edge cases");
-  console.log("═══════════════════════════════════════════\n");
-
-  // Test 3.1: await nonexistent promise
-  console.log("Test 3.1: await nonexistent promise → returns error\n");
-  const awaitNonExist = await promiseAwaitSafe(awaitTool, "c-3.1", { promiseId: "promise-nonexistent-12345" });
-  if (awaitNonExist.isError) {
-    console.log("✅ 3.1: Nonexistent promise correctly errors\n");
-  } else {
-    console.log("❌ 3.1: Expected error for nonexistent promise");
-    throw new Error("Nonexistent promise did not error");
-  }
-
-  // Test 3.2: await failed promise
-  console.log("Test 3.2: await failed promise → returns error with details\n");
-  const failForAwait = await createTool.execute("c-3.2", {
-    command: "exit 99",
-    name: "await-fail-test",
-  });
-  const failAwaitId = failForAwait.details?.promiseId;
-  await sleep(800);
-  const awaitFailed = await promiseAwaitSafe(awaitTool, "c-3.2b", { promiseId: failAwaitId });
-  if (awaitFailed.isError) {
-    console.log("✅ 3.2: Await on failed promise returns error");
-    console.log("  details.error:", awaitFailed.details?.error);
-    console.log("");
-  } else {
-    console.log("❌ 3.2: Expected error for failed promise");
-    throw new Error("Await on failed did not error");
-  }
-
-  // Test 3.3: await cancelled promise
-  console.log("Test 3.3: await cancelled promise → returns error with details\n");
-  const cancelForAwait = await createTool.execute("c-3.3", {
-    command: "sleep 10",
-    name: "await-cancel-test",
-  });
-  const cancelAwaitId = cancelForAwait.details?.promiseId;
-  await sleep(50);
-  await cancelTool.execute("c-3.3b", { promiseId: cancelAwaitId });
-  await sleep(200);
-  const awaitCancelled = await promiseAwaitSafe(awaitTool, "c-3.3c", { promiseId: cancelAwaitId });
-  if (awaitCancelled.isError) {
-    console.log("✅ 3.3: Await on cancelled promise returns error\n");
-  } else {
-    console.log("❌ 3.3: Expected error for cancelled promise");
-    throw new Error("Await on cancelled did not error");
-  }
-
-  // ===========================================================================
-  // SECTION 4: promise-status — edge cases
-  // ===========================================================================
-  console.log("═══════════════════════════════════════════");
-  console.log("Section 4: promise-status edge cases");
+  console.log("Section 3: promise-status edge cases");
   console.log("═══════════════════════════════════════════\n");
 
   // Test 4.1: status on nonexistent promise
@@ -257,10 +203,10 @@ async function main() {
   console.log("");
 
   // ===========================================================================
-  // SECTION 5: promise-cancel — edge cases
+  // SECTION 4: promise-cancel — edge cases
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 5: promise-cancel edge cases");
+  console.log("Section 4: promise-cancel edge cases");
   console.log("═══════════════════════════════════════════\n");
 
   // Test 5.1: cancel nonexistent promise
@@ -306,10 +252,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 6: promise-then — argument validation
+  // SECTION 5: promise-then — argument validation
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 6: promise-then argument validation");
+  console.log("Section 5: promise-then argument validation");
   console.log("═══════════════════════════════════════════\n");
 
   // Create a completed root for these tests
@@ -405,10 +351,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 7: Condition edge cases
+  // SECTION 6: Condition edge cases
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 7: Condition edge cases");
+  console.log("Section 6: Condition edge cases");
   console.log("═══════════════════════════════════════════\n");
 
   // Test 7.1: on-success chain when parent FAILS → child is cancelled (skipped)
@@ -478,10 +424,10 @@ async function main() {
   console.log("✅ 7.3: 'always' child correctly ran after parent failure\n");
 
   // ===========================================================================
-  // SECTION 8: promise-then with download
+  // SECTION 7: promise-then with download
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 8: promise-then download variant");
+  console.log("Section 7: promise-then download variant");
   console.log("═══════════════════════════════════════════\n");
 
   // Test 8.1: promise-then with download (unreachable URL, should fail)
@@ -516,10 +462,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 9: promise-rechain validation
+  // SECTION 8: promise-rechain validation
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 9: promise-rechain validation");
+  console.log("Section 8: promise-rechain validation");
   console.log("═══════════════════════════════════════════\n");
 
   // Test 9.1: rechain with nonexistent fromPromise
@@ -636,10 +582,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 10: promise-graph edge cases
+  // SECTION 9: promise-graph edge cases
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 10: promise-graph edge cases");
+  console.log("Section 9: promise-graph edge cases");
   console.log("═══════════════════════════════════════════\n");
 
   // Test 10.1: graph with nonexistent ID
@@ -655,10 +601,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 11: Empty state
+  // SECTION 10: Empty state
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 11: Empty / no-promises state");
+  console.log("Section 10: Empty / no-promises state");
   console.log("═══════════════════════════════════════════\n");
 
   // Note: this module has accumulated promises from all prior sections.
@@ -678,10 +624,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 12: Dedup edge cases
+  // SECTION 11: Dedup edge cases
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 12: Dedup edge cases");
+  console.log("Section 11: Dedup edge cases");
   console.log("═══════════════════════════════════════════\n");
 
   // Test 12.1: dedup on failed promise → should create new
@@ -737,10 +683,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 13: Replace edge cases
+  // SECTION 12: Replace edge cases
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 13: Replace edge cases");
+  console.log("Section 12: Replace edge cases");
   console.log("═══════════════════════════════════════════\n");
 
   // Test 13.1: replace on completed promise → should cancel and create new
@@ -770,10 +716,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 14: Command edge cases
+  // SECTION 13: Command edge cases
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 14: Command edge cases");
+  console.log("Section 13: Command edge cases");
   console.log("═══════════════════════════════════════════\n");
 
   // Test 14.1: command with empty output
@@ -812,10 +758,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 15: Promise created with then on failing parent (default: 'always')
+  // SECTION 14: Promise created with then on failing parent (default: 'always')
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 15: promise-create with then on failing parent");
+  console.log("Section 14: promise-create with then on failing parent");
   console.log("═══════════════════════════════════════════\n");
 
   // Test 15.1: 'then' child with default 'always' condition on a failing parent → child runs
@@ -861,10 +807,10 @@ async function main() {
   }
 
   // ===========================================================================
-  // SECTION 16: Tmux integration helpers
+  // SECTION 15: Tmux integration helpers
   // ===========================================================================
   console.log("═══════════════════════════════════════════");
-  console.log("Section 16: Tmux integration helpers");
+  console.log("Section 15: Tmux integration helpers");
   console.log("═══════════════════════════════════════════\n");
 
   // Import the tmux helpers from the module
@@ -1040,18 +986,7 @@ async function main() {
   try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
-// =============================================================================
-// Safe wrapper for promise-await (handles both isError and non-error returns)
-// =============================================================================
-async function promiseAwaitSafe(tool: RegisteredTool, callId: string, args: { promiseId: string }) {
-  const result = await tool.execute(callId, args);
-  return {
-    isError: !!(result.isError || (result.details && result.details.success === false) || (result.content?.[0]?.text?.includes("not found") || result.content?.[0]?.text?.includes("failed") || result.content?.[0]?.text?.includes("cancelled"))),
-    details: result.details,
-    content: result.content,
-    result,
-  };
-}
+
 
 main().catch((err) => {
   console.error("\n❌ Corner-case test suite failed:", err.message);
