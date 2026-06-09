@@ -13,7 +13,6 @@
  * Tools:
  * - promise-create: Start async task in background, returns immediately
  * - promise-then: Chain a task after an existing promise completes
- * - promise-block-until-complete: Wait with smart heuristics (avoid — chains are better)
  * - promise-status: Check without blocking
  * - promises-list: List all tracked promises
  * - promise-cancel: Cancel a pending/running promise
@@ -34,6 +33,23 @@ import { join, dirname } from "node:path";
 
 import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+// Minimal Component interface compatible with pi-tui's Component.
+// Avoids hard dependency on @earendil-works/pi-tui while keeping strong typing.
+interface Component {
+  render(width: number): string[];
+  handleInput?(data: string): void;
+  wantsKeyRelease?: boolean;
+  invalidate(): void;
+}
+
+/** Create a simple text-only Component from a string. */
+function TextComponent(text: string): Component {
+  return {
+    render: (_width: number) => [text],
+    invalidate: () => {},
+  };
+}
 
 // =============================================================================
 // Types
@@ -74,13 +90,13 @@ interface BackgroundPromise {
   progress?: number;
   /** Last line of stdout — shown as status message in footer */
   statusMessage?: string;
+  /** Instance ID that created this promise — used for session isolation */
+  instanceId?: string;
+  /** What the LLM wants to do after this promise completes */
+  intent?: string;
 }
 
-interface AwaitOptions {
-  promiseId: string;
-  stallTimeout?: number;
-  doneGracePeriod?: number;
-}
+
 
 // =============================================================================
 // Types
@@ -94,6 +110,27 @@ type ThenCondition = "always" | "on-success" | "on-failure";
 
 const promises = new Map<string, BackgroundPromise>();
 let promiseCounter = 0;
+
+// Pending promise results to inject into system prompt via before_agent_start
+interface PendingResult {
+  promiseId: string;
+  name: string;
+  subject?: string;
+  status: string;
+  result?: unknown;
+  error?: string;
+  intent?: string;
+}
+const _pendingResults: PendingResult[] = [];
+
+const BACKGROUND_TASK_INSTRUCTIONS = `
+## Background Tasks (bg-promises)
+- NEVER wait on background tasks. Do not use promise-block-until-complete. Do not poll promise status. Do not create timeout loops.
+- Trust auto-delivery — results arrive automatically via [System] messages.
+- When creating a promise, specify an "intent" — what to do after it completes.
+- When [System] Promise completed appears, execute the intent automatically. Do not ask the user what to do.
+- If the result changes what should be done, adjust the intent accordingly.
+`;
 
 function generatePromiseId(): string {
   return `promise-${Date.now()}-${++promiseCounter}`;
@@ -128,7 +165,15 @@ function findPromiseBySubject(subject: string): BackgroundPromise | undefined {
 // State Persistence — survive reloads
 // =============================================================================
 
-const _STATE_FILE = join(process.env.HOME || "/tmp", ".pi", "agent", "promise-state.json");
+const _LEGACY_STATE_FILE = join(process.env.HOME || "/tmp", ".pi", "agent", "promise-state.json");
+
+/** Session-scoped state file path — each pi session gets its own file.
+ * Scoped by tmux session name (stable across reloads) or instance ID (non-tmux). */
+function _getStateFile(): string {
+  const sessionKey = _getCurrentTmuxSession() || _instanceId;
+  const safeKey = sessionKey.replace(/[^a-zA-Z0-9\-]/g, "-");
+  return join(process.env.HOME || "/tmp", ".pi", "agent", `promise-state-${safeKey}.json`);
+}
 
 /** Serialize and save the promise map to disk — only running/pending promises. */
 function _saveState(): void {
@@ -161,17 +206,21 @@ function _saveState(): void {
       progress: p.progress,
       statusMessage: p.statusMessage,
       notified: p.notified,
+      instanceId: p.instanceId,
+      intent: p.intent,
     }));
-    mkdirSync(dirname(_STATE_FILE), { recursive: true });
-    writeFileSync(_STATE_FILE, JSON.stringify(data, null, 2), "utf-8");
+    const stateFile = _getStateFile();
+    mkdirSync(dirname(stateFile), { recursive: true });
+    writeFileSync(stateFile, JSON.stringify(data, null, 2), "utf-8");
   } catch {}
 }
 
 /** Load and restore the promise map from disk on startup, then re-establish tracking. */
 function _loadState(): void {
   try {
-    if (!existsSync(_STATE_FILE)) return;
-    const data = JSON.parse(readFileSync(_STATE_FILE, "utf-8")) as any[];
+    const stateFile = _getStateFile();
+    if (!existsSync(stateFile)) return;
+    const data = JSON.parse(readFileSync(stateFile, "utf-8")) as any[];
     for (const item of data) {
       const p: BackgroundPromise = {
         id: item.id,
@@ -200,6 +249,8 @@ function _loadState(): void {
         progress: item.progress,
         statusMessage: item.statusMessage,
         notified: item.notified,
+        instanceId: item.instanceId,
+        intent: item.intent,
       };
       promises.set(p.id, p);
       // Re-establish tmux polling for running promises
@@ -212,17 +263,40 @@ function _loadState(): void {
 
 /** After reload, re-discover a promise's tmux session and restart completion polling. */
 function _resumePromiseTracking(promise: BackgroundPromise): void {
-  try {
-    const output = execSync(`tmux list-sessions -F "#S" 2>/dev/null`, { stdio: "pipe", encoding: "utf-8", timeout: 3000 });
-    const lines = output.trim().split("\n");
-    for (const line of lines) {
-      if (line.endsWith(`-${promise.id}`)) {
-        _tmuxSessions.set(promise.id, line);
-        _startTmuxPolling(promise);
-        return;
+  // Use the promise's own instanceId (if stored) to build the expected session name.
+  // This prevents reconnecting to tmux sessions from other pi instances.
+  const saved = promise.instanceId;
+  if (saved) {
+    // Temporarily set instanceId on a copy for _toTmuxName
+    const tmpPromise = { ...promise, instanceId: saved };
+    const expectedName = _toTmuxName(tmpPromise);
+    try {
+      const output = execSync(`tmux list-sessions -F "#S" 2>/dev/null`, { stdio: "pipe", encoding: "utf-8", timeout: 3000 });
+      const lines = output.trim().split("\n");
+      for (const line of lines) {
+        if (line === expectedName) {
+          _tmuxSessions.set(promise.id, line);
+          _startTmuxPolling(promise);
+          return;
+        }
       }
-    }
-  } catch {}
+    } catch {}
+  } else {
+    // Legacy promise without instanceId — fall back to prefix-aware matching
+    try {
+      const parentSession = _getCurrentTmuxSession();
+      const prefix = parentSession ? `promise-${parentSession}-` : `promise-`;
+      const output = execSync(`tmux list-sessions -F "#S" 2>/dev/null`, { stdio: "pipe", encoding: "utf-8", timeout: 3000 });
+      const lines = output.trim().split("\n");
+      for (const line of lines) {
+        if (line.startsWith(prefix) && line.endsWith(`-${promise.id}`)) {
+          _tmuxSessions.set(promise.id, line);
+          _startTmuxPolling(promise);
+          return;
+        }
+      }
+    } catch {}
+  }
 
   // Tmux session not found — check if the output file has a completion marker
   // This handles the case where the command finished during shutdown
@@ -394,18 +468,8 @@ function buildAllChainsText(): string[] {
 
 let _notifyCompletion: ((promise: BackgroundPromise) => void) | undefined;
 
-/**
- * Promises being explicitly blocked on via promise-block-until-complete.
- * notifyCompletion skips these — the result already went to the LLM directly.
- */
-const _awaitedPromises = new Set<string>();
-
 function notifyCompletion(promise: BackgroundPromise): void {
   if (promise.notified) return;
-  // If the LLM explicitly awaited this promise, the result was already
-  // returned directly from promise-block-until-complete. Suppress the notification to
-  // avoid a duplicate follow-up turn.
-  if (_awaitedPromises.has(promise.id)) return;
   promise.notified = true;
   try {
     _notifyCompletion?.(promise);
@@ -463,13 +527,12 @@ const _BLOCK_SHADES = ["\u2593", "\u2592", "\u2591"];
 /** Extra fill characters for smooth animation: ▁▂▃▄▅▆▇█ */
 const _FILL_CHARS = ["\u2581", "\u2582", "\u2583", "\u2584", "\u2585", "\u2586", "\u2587", "\u2588"];
 
-let _animBlink = false;
 let _animDisplayLevel = 0;
 let _lastPartialLevel = 0;
 const _ANIM_VELOCITY = 0.4;
 
 /** Convert a progress percentage (0-100) to a 4-block progress bar string. */
-function _progressToBlocks(pct: number, _blink: boolean): string {
+function _progressToBlocks(pct: number): string {
   const totalSteps = 16;
   const step = Math.min(Math.max(Math.round(pct / 100 * totalSteps), 0), totalSteps);
   const fullBars = Math.floor(step / 4);
@@ -554,7 +617,7 @@ function _chainCompact(root: BackgroundPromise, rootIndex: number, theme: any): 
       const pct = current.progress ?? (current.totalSize
         ? Math.round((current.lastKnownSize / current.totalSize) * 100)
         : 0);
-      const bar = _progressToBlocks(pct, _animBlink);
+      const bar = _progressToBlocks(pct);
       const pctStr = ` ${Math.min(pct, 99)}%`;
 
       if (isFirst) {
@@ -676,7 +739,7 @@ function _expandedLine(
     const pct = promise.progress ?? (promise.totalSize
       ? Math.round((promise.lastKnownSize / promise.totalSize) * 100)
       : 0);
-    const bar = _progressToBlocks(pct, _animBlink);
+    const bar = _progressToBlocks(pct);
     const pctStr = `${Math.min(pct, 99)}%`;
     let line = `${indent}${theme.fg(color, bar)} ${theme.fg("dim", typeIcon)} ${theme.fg("text", promise.name)}`;
     if (promise.thenCondition && depth > 0) {
@@ -843,7 +906,6 @@ function _startAnimTimer(): void {
       return;
     }
     _animFrame++;
-    _animBlink = !_animBlink;
     // Lightweight: only update compact footer, not the expanded widget
     if (!_statusBarCtx) return;
     const { ui, theme } = _statusBarCtx;
@@ -862,58 +924,7 @@ function _stopAnimTimer(): void {
   }
 }
 
-// =============================================================================
-// Smart Stall Detection for Downloads
-async function waitForDownload(
-  promise: BackgroundPromise,
-  options: AwaitOptions
-): Promise<{ content: { type: "text"; text: string }[]; details: { success: boolean; result?: unknown; error?: string }; isError?: boolean }> {
-  if (!promise.targetPath) {
-    return {
-      content: [{ type: "text", text: "No target path for download" }],
-      details: { success: false, error: "No target path for download" },
-      isError: true
-    };
-  }
 
-  const stallTimeout = (options.stallTimeout ?? 60) * 1000;
-
-  while (true) {
-    const current = getPromise(promise.id);
-    if (!current || current.status === "cancelled") {
-      return {
-        content: [{ type: "text", text: "Promise was cancelled" }],
-        details: { success: false, error: "Cancelled" },
-        isError: true
-      };
-    }
-
-    if (current.status === "completed") {
-      return {
-        content: [{ type: "text", text: `Download complete: ${promise.targetPath} (${current.lastKnownSize} bytes)` }],
-        details: { success: true, result: { path: promise.targetPath, size: current.lastKnownSize } }
-      };
-    }
-
-    if (current.status === "failed") {
-      return {
-        content: [{ type: "text", text: current.error ?? "Download failed" }],
-        details: { success: false, error: current.error },
-        isError: true
-      };
-    }
-
-    if (Date.now() - (current.createdAt ?? Date.now()) >= stallTimeout) {
-      return {
-        content: [{ type: "text", text: `Download stalled: no progress for ${options.stallTimeout}s` }],
-        details: { success: false, error: `Stalled: no progress for ${options.stallTimeout}s` },
-        isError: true
-      };
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-}
 
 // =============================================================================
 // Content-Length Helper
@@ -1149,6 +1160,7 @@ async function runChainedPromise(promise: BackgroundPromise): Promise<void> {
           error: `Skipped: parent ${promise.id} status ${promise.status} did not meet condition ${promise.thenCondition}`,
           lastKnownSize: 0,
           createdAt: Date.now(),
+          instanceId: promise.instanceId || _instanceId,
         };
         setPromise(skipped);
         notifyCompletion(skipped);
@@ -1176,6 +1188,7 @@ async function runChainedPromise(promise: BackgroundPromise): Promise<void> {
       previousResult: promise.result,
       lastKnownSize: 0,
       createdAt: Date.now(),
+      instanceId: promise.instanceId || _instanceId,
     };
     promise.thenPromiseId = chained.id;
     setPromise(promise);
@@ -1256,9 +1269,10 @@ function _isTmuxAvailable(): boolean {
  */
 function _toTmuxName(promise: BackgroundPromise): string {
   const parentSession = _getCurrentTmuxSession();
+  const id = promise.instanceId || _instanceId;
   const prefix = parentSession
-    ? `promise-${parentSession}-${_instanceId}-`
-    : `promise-${_instanceId}-`;
+    ? `promise-${parentSession}-${id}-`
+    : `promise-${id}-`;
   const maxTotal = 64;
   const sanitized = promise.id.replace(/[^a-zA-Z0-9\-]/g, "-");
   const available = maxTotal - prefix.length;
@@ -1272,13 +1286,28 @@ function _killOrphanedTmuxSessions(): void {
   try {
     const parentSession = _getCurrentTmuxSession();
     // Scope cleanup to this tmux session only — other sessions' promises untouched
-    const orphanPrefix = parentSession
+    const scopePrefix = parentSession
       ? `promise-${parentSession}-`
       : `promise-`;
+
+    // Collect expected tmux session names for all active promises
+    const activeSessions = new Set<string>();
+    for (const [, sessionName] of _tmuxSessions) {
+      activeSessions.add(sessionName);
+    }
+    // Also include promises we haven't reconnected to yet
+    for (const [, p] of promises) {
+      if (p.status === "running" || p.status === "pending") {
+        const tmpPromise = { ...p, instanceId: p.instanceId || _instanceId };
+        activeSessions.add(_toTmuxName(tmpPromise));
+      }
+    }
+
     const output = execSync(`tmux list-sessions -F "#S" 2>/dev/null`, { stdio: "pipe", encoding: "utf-8", timeout: 3000 });
     const lines = output.trim().split("\n");
     for (const line of lines) {
-      if (line.startsWith(orphanPrefix)) {
+      // Only kill sessions in our scope that aren't tracked by any active promise
+      if (line.startsWith(scopePrefix) && !activeSessions.has(line)) {
         try {
           execSync(`tmux kill-session -t "${line}" 2>/dev/null`, { stdio: "ignore" });
         } catch {}
@@ -1287,13 +1316,6 @@ function _killOrphanedTmuxSessions(): void {
   } catch {
     // tmux may not be available
   }
-}
-
-/** Mark a promise as completed/failed/cancelled and clean up resources. */
-function _finalizePromise(promise: BackgroundPromise): void {
-  _killTmuxSession(promise.id);
-  _cleanupTempFiles(promise.id);
-  setPromise(promise);
 }
 
 function _killTmuxSession(promiseId: string): void {
@@ -1597,75 +1619,74 @@ function cancelAllPromises(): void {
 
 function registerTools(pi: ExtensionAPI): void {
 
+  // ---- Custom TUI renderer for promise-completion messages ----
+  // Adds visual icons (🔔 ❌ ⏱) for the user while keeping [System] clean for the LLM.
+  pi.registerMessageRenderer("promise-completion", (message, _options, theme) => {
+    const content = message.content as string;
+    let icon = "\ud83d\udd14"; // default bell
+    if (content.startsWith("[System] Promise failed")) icon = "\u274c";
+    else if (content.startsWith("[System] Promise cancelled")) icon = "\u23f1";
+    const color = icon === "\u274c" ? "error" : icon === "\u23f1" ? "dim" : "accent";
+    const text = `${icon} ${content}`;
+    return TextComponent(theme.fg(color, text));
+  });
+
   // ---- Auto-notification when promises complete ----
   // When a background promise finishes, inject a message into the agent's
   // conversation so the agent is automatically notified without polling.
   _notifyCompletion = (promise: BackgroundPromise) => {
     try {
       if (promise.status === "completed") {
-        const lines = [
-          `\u{1F514} Promise "${promise.name}" completed!`,
-          `\u2022 Type: ${promise.type}`,
-        ];
-        if (promise.result) {
-          const resultStr =
-            typeof promise.result === "object"
-              ? JSON.stringify(promise.result, null, 2)
-              : String(promise.result);
-          lines.push(`Result: ${resultStr}`);
-        }
+        // Store result for injection via before_agent_start
+        _pendingResults.push({
+          promiseId: promise.id,
+          name: promise.name,
+          subject: promise.subject,
+          status: "completed",
+          result: promise.result,
+          intent: promise.intent,
+        });
 
+        // Brief trigger message — full result is in system context
+        const intentLine = promise.intent ? `\nIntent: ${promise.intent}` : "";
         pi.sendMessage(
           {
             customType: "promise-completion",
-            content: lines.join("\n"),
+            content: `[System] Promise completed: ${promise.subject ?? promise.name}${intentLine}`,
             display: true,
           },
           { triggerTurn: true, deliverAs: "followUp" }
         );
       } else if (promise.status === "failed") {
-        const lines = [
-          `\u274C Promise "${promise.name}" failed!`,
-          `\u2022 Type: ${promise.type}`,
-          `\u2022 Error: ${promise.error ?? "Unknown error"}`,
-        ];
-        if (promise.result) {
-          lines.push(`Partial result: ${JSON.stringify(promise.result)}`);
-        }
+        // Store failure for injection via before_agent_start
+        _pendingResults.push({
+          promiseId: promise.id,
+          name: promise.name,
+          subject: promise.subject,
+          status: "failed",
+          error: promise.error,
+          result: promise.result,
+          intent: promise.intent,
+        });
 
+        const intentLine = promise.intent ? `\nIntent: ${promise.intent}` : "";
         pi.sendMessage(
           {
             customType: "promise-completion",
-            content: lines.join("\n"),
+            content: `[System] Promise failed: ${promise.subject ?? promise.name}\nError: ${promise.error ?? "Unknown"}${intentLine}`,
             display: true,
           },
           { triggerTurn: true, deliverAs: "followUp" }
         );
       } else if (promise.status === "cancelled") {
-        const lines = [
-          `\u23F1 Promise "${promise.name}" skipped!`,
-          `\u2022 Type: ${promise.type}`,
-          `\u2022 Reason: ${promise.error ?? "Cancelled"}`,
-        ];
-        // Show the parent chain for context
-        for (const [, p] of promises) {
-          if (p.thenPromiseId === promise.id) {
-            const parentId = p.id;
-            const parent = promises.get(parentId);
-            if (parent) {
-              lines.push(`Parent "${parent.name}" (${parent.id}) status: ${parent.status}`);
-            }
-            break;
-          }
-        }
-
+        // Cancelled — notify but don't inject results
         pi.sendMessage(
           {
             customType: "promise-completion",
-            content: lines.join("\n"),
+            content: `[System] Promise cancelled: ${promise.subject ?? promise.name}`,
             display: true,
           },
-          { triggerTurn: true, deliverAs: "followUp" }
+          { triggerTurn: false }
         );
       }
 
@@ -1699,11 +1720,47 @@ function registerTools(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     sessionCtx = { ui: ctx.ui, theme: ctx.ui.theme };
+    // Clean up orphan tmux sessions from previous instances before loading
+    _killOrphanedTmuxSessions();
     _loadState();
-    // Delete state file after loading — it's only needed to survive reload
-    // during a single pi session. Fresh starts should start clean.
-    try { unlinkSync(_STATE_FILE); } catch {}
+    // Delete state files after loading — they're only needed to survive reload
+    // during a single pi session. Clean up both legacy and scoped files.
+    try { unlinkSync(_getStateFile()); } catch {}
+    try { unlinkSync(_LEGACY_STATE_FILE); } catch {}
     _updateStatusBar(sessionCtx);
+  });
+
+  // ---- Inject background task instructions and pending results into system prompt ----
+  let _instructionsInjected = false;
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    const additions: string[] = [];
+
+    // Inject instructions once when promises exist
+    if (!_instructionsInjected && promises.size > 0) {
+      _instructionsInjected = true;
+      additions.push(BACKGROUND_TASK_INSTRUCTIONS);
+    }
+
+    // Inject pending results
+    if (_pendingResults.length > 0) {
+      const results = _pendingResults.splice(0); // drain
+      additions.push(
+        "[Background Task Results]\n" +
+        results.map(r => {
+          const status = r.status === "completed" ? "completed" : "failed";
+          const intentLine = r.intent ? `\nIntent: ${r.intent}` : "";
+          const errorLine = r.error ? `\nError: ${r.error}` : "";
+          const resultStr = r.result ? `\nResult: ${typeof r.result === "object" ? JSON.stringify(r.result) : r.result}` : "";
+          return `- \"${r.subject ?? r.name}\" (${status})${errorLine}${resultStr}${intentLine}`;
+        }).join("\n")
+      );
+    }
+
+    if (additions.length === 0) return;
+    return {
+      systemPrompt: event.systemPrompt + "\n\n" + additions.join("\n\n"),
+    };
   });
 
   pi.on("session_shutdown", async () => {
@@ -1832,16 +1889,17 @@ let _promiseViewId: string | null = null;
     defineTool({
       name: "promise-create",
       label: "Promise Create",
-      description: "Start an async task in background. Returns immediately with a promise ID. You can continue working on other tasks while it runs. When the promise completes, you'll be automatically notified with the result. Supports chaining with 'then' parameter. Do NOT call promise-block-until-complete after this — the result auto-delivers.\n\nProgress tracking: If the command can report progress, add \"echo PROMISE_PROGRESS:\$i\" to each iteration. The footer will show a live block bar instead of the default circle animation. PROMISE_PROGRESS lines are auto-filtered from the final result.",
+      description: "Start an async task in background. Returns immediately with a promise ID. You can continue working on other tasks while it runs. When the promise completes, you'll be automatically notified with the result. Supports chaining with 'then' parameter.\n\nProgress tracking: If the command can report progress, add \"echo PROMISE_PROGRESS:\$i\" to each iteration. The footer will show a live block bar instead of the default circle animation. PROMISE_PROGRESS lines are auto-filtered from the final result.",
       promptSnippet: "Start a background task and keep working — results auto-deliver",
       promptGuidelines: [
         "DEFAULT TO USING PROMISES. If a task takes more than a couple seconds, fire promise-create and keep working on other things.",
         "You get a promiseId immediately and can continue other work without blocking — edit files, read code, answer questions, start more promises.",
-        "When a promise completes, a 🔔 notification message is automatically delivered. You do NOT need to poll or await.",
+        "NEVER WAIT on background tasks. Do not use promise-block-until-complete. Do not poll promise status. Do not create timeout loops. Trust auto-delivery.",
+        "Use the 'intent' parameter to specify what to do after the promise completes. When notified, execute the intent automatically.",
         "Use the 'then' parameter to chain a command that runs automatically after the first completes.",
         "After creating a promise, work on DIFFERENT things — don't start the same work manually. The promise handles its task.",
         "If you have nothing else to do while a promise runs, it's fine to stop — the promise notification will wake you up when the result is ready.",
-        "When a promise completion notification arrives, the result is ready to use. Act on it naturally — inspect the output, chain next steps, or report to the user.",
+        "When a [System] notification arrives, the result is ready. Execute the intent automatically — do not ask the user what to do.",
         "DEDUP: Use dedup=true + subject=... to avoid creating duplicate promises. If a promise with the same subject already exists (and hasn't failed), the existing promise's ID is returned instead of creating a new one.",
         "REPLACE: Use replace=true + subject=... to cancel an existing promise with the same subject and create a fresh one. This is the pattern for 're-run tests after code changes'.",
         "PROGRESS: HIGHLY SUGGESTED — If a command can report progress, add PROMISE_PROGRESS:N to your command (where N is 0-100). The promise will show a live block progress bar in the footer instead of the default circle animation. Example: `for i in \$(seq 0 100); do echo \"PROMISE_PROGRESS:\$i\"; \$COMMAND; done` — the PROGRESS: lines are automatically filtered from the final output.",
@@ -1854,6 +1912,7 @@ let _promiseViewId: string | null = null;
         thenCondition: Type.Optional(Type.String({ description: "Chain condition: 'always' (default), 'on-success', or 'on-failure'" })),
         name: Type.Optional(Type.String({ description: "Optional name for this promise" })),
         subject: Type.Optional(Type.String({ description: "Semantic label for dedup/replace matching. Use with dedup=true to avoid duplicates, or replace=true to cancel-and-restart." })),
+        intent: Type.Optional(Type.String({ description: "What to do after this promise completes. The LLM will execute this automatically when notified. Do NOT use promise-block-until-complete — trust auto-delivery." })),
         dedup: Type.Optional(Type.Boolean({ description: "Skip creation if a promise with the same subject already exists (and hasn't failed). Returns the existing promise instead." })),
         replace: Type.Optional(Type.Boolean({ description: "Cancel any existing promise with the same subject before creating a new one. Use when re-running a task after changes." })),
       }),
@@ -1865,6 +1924,7 @@ let _promiseViewId: string | null = null;
         thenCondition?: string;
         name?: string;
         subject?: string;
+        intent?: string;
         dedup?: boolean;
         replace?: boolean;
       }, _signal?: AbortSignal): Promise<any> {
@@ -1960,6 +2020,8 @@ let _promiseViewId: string | null = null;
           thenCondition: args.then ? thenCondition : undefined,
           lastKnownSize: 0,
           createdAt: Date.now(),
+          instanceId: _instanceId,
+          intent: args.intent,
         };
 
         // Pre-create child immediately so promise-then always finds the
@@ -1974,6 +2036,7 @@ let _promiseViewId: string | null = null;
             command: args.then,
             lastKnownSize: 0,
             createdAt: Date.now(),
+            instanceId: _instanceId,
           };
           promise.thenPromiseId = child.id;
           setPromise(child);
@@ -1999,8 +2062,11 @@ let _promiseViewId: string | null = null;
         const replaceInfo = args.replace
           ? " — replaced previous run"
           : "";
+        const intentInfo = promise.intent
+          ? ` — intent: ${promise.intent}`
+          : "";
         const commandDisplay = promise.command?.slice(0, 100) ?? promise.url ?? "";
-        const text = `Started ${promise.type}: ${promise.id}${subjectInfo}${chainInfo}${replaceInfo}`;
+        const text = `Started ${promise.type}: ${promise.id}${subjectInfo}${chainInfo}${replaceInfo}${intentInfo}`;
 
         return {
           content: [{ type: "text", text: `${text}` }],
@@ -2022,134 +2088,6 @@ let _promiseViewId: string | null = null;
       },
     })
   );
-
-  // ---------------------------------------------------------------------
-  // promise-block-until-complete: Block until done (last resort — prefer promise-then)
-  // ---------------------------------------------------------------------
-  pi.registerTool(
-    defineTool({
-      name: "promise-block-until-complete",
-      label: "Promise Block Until Complete",
-      description: "⚠️ DEPRECATED — Do not use. Results auto-deliver. Trust the notification. Never wait for a promise; always keep working and let the result wake you up.",
-      promptSnippet: "⚠️ DEPRECATED — never block on a promise, trust auto-delivery",
-      promptGuidelines: [
-        "⚠️ Do NOT call this tool unless you have absolutely no other work to do.",
-        "Results auto-deliver as messages — trust auto-delivery instead of blocking.",
-        "If you need to chain work after a promise, use promise-then(promiseId, command) instead.",
-        "This tool blocks your progress — promise-then keeps you working.",
-      ],
-      parameters: Type.Object({
-        promiseId: Type.String({ description: "ID returned by promise-create" }),
-        stallTimeout: Type.Optional(Type.Number({ description: "Seconds of no progress before timeout (downloads only, default: 60)" })),
-        doneGracePeriod: Type.Optional(Type.Number({ description: "Seconds of no growth before considered done (downloads only, default: 5)" })),
-      }),
-      async execute(_toolCallId: string, args: {
-        promiseId: string;
-        stallTimeout?: number;
-        doneGracePeriod?: number;
-      }, _signal?: AbortSignal) {
-        const promise = getPromise(args.promiseId);
-
-        if (!promise) {
-          return {
-            content: [{ type: "text", text: `Promise not found: ${args.promiseId}` }],
-            details: { success: false, error: `Promise not found: ${args.promiseId}` },
-            isError: true
-          };
-        }
-
-        // Mark as explicitly blocked BEFORE returning — notifyCompletion
-        // checks this set and suppresses the auto-notification to avoid
-        // a duplicate follow-up turn when the LLM already has the result.
-        _awaitedPromises.add(args.promiseId);
-
-        if (promise.status === "completed") {
-          // Include result in details for agent use
-          return { 
-            content: [{ type: "text", text: `Promise completed
-Tip: Never block on a promise — results auto-deliver. Instead, use promise-then(promiseId="${promise.id}", command=..., condition="on-success") to chain follow-up work automatically while you keep working.` }], 
-            details: { 
-              success: true, 
-              result: promise.result,
-              previousResult: promise.previousResult,
-              error: "" 
-            } 
-          };
-        }
-        if (promise.status === "failed") {
-          return { 
-            content: [{ type: "text", text: promise.error ?? "Promise failed" }], 
-            details: { 
-              success: false, 
-              error: promise.error ?? "Failed",
-              result: promise.result 
-            },
-            isError: true 
-          };
-        }
-        if (promise.status === "cancelled") {
-          return { 
-            content: [{ type: "text", text: "Promise was cancelled" }], 
-            details: { success: false, error: "Cancelled" },
-            isError: true 
-          };
-        }
-
-        if (_signal?.aborted) {
-          return {
-            content: [{ type: "text", text: "Aborted by caller" }],
-            details: { success: false, error: "Aborted", result: undefined, previousResult: undefined },
-            isError: true
-          };
-        }
-
-        if (promise.type === "download") {
-          return await waitForDownload(promise, args);
-        }
-
-        // For commands, simple poll with result passthrough
-        while (getPromise(args.promiseId)?.status === "running") {
-          if (_signal?.aborted) {
-            return {
-              content: [{ type: "text", text: "Aborted by caller" }],
-              details: { success: false, error: "Aborted", result: undefined, previousResult: undefined },
-              isError: true
-            };
-          }
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-        
-        const finalPromise = getPromise(args.promiseId);
-        if (!finalPromise) {
-          return { 
-            content: [{ type: "text", text: "Promise disappeared" }], 
-            details: { success: false, error: "Promise disappeared" },
-            isError: true 
-          };
-        }
-        
-        if (finalPromise.status === "completed") {
-          return { 
-            content: [{ type: "text", text: "Completed" }], 
-            details: { 
-              success: true, 
-              result: finalPromise.result,
-              previousResult: finalPromise.previousResult,
-              error: "" 
-            } 
-          };
-        }
-        
-        return { 
-          content: [{ type: "text", text: finalPromise.error ?? "Unknown state" }], 
-          details: { success: false, error: finalPromise.error ?? "Unknown" },
-          isError: true 
-        };
-      },
-    })
-  );
-
-  // ---------------------------------------------------------------------
   // promise-status: Check without blocking
   // ---------------------------------------------------------------------
   pi.registerTool(
@@ -2616,7 +2554,7 @@ Tip: Never block on a promise — results auto-deliver. Instead, use promise-the
         "Multiple promise-then calls on the same promise create a sequential chain (each appends at the end).",
         "Use condition='on-success' or condition='on-failure' to control when the chain runs.",
         "If the target promise is already completed, the chained task runs immediately (subject to condition).",
-        "Use promise-then instead of promise-block-until-complete whenever possible. Let the chain handle sequencing while you work on other things.",
+
         "After chaining, run promise-graph(promiseId=...) to inspect the chain structure and verify it's what you intended.",
       ],
       parameters: Type.Object({
