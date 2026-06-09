@@ -43,10 +43,13 @@ interface Component {
   invalidate(): void;
 }
 
-/** Create a simple text-only Component from a string. */
+/** Create a simple text-only Component from a string.
+ * Splits on newlines so each line is a separate render element.
+ * Without this, pi-tui measures the entire string as one line,
+ * which crashes when the visible width exceeds the terminal. */
 function TextComponent(text: string): Component {
   return {
-    render: (_width: number) => [text],
+    render: (_width: number) => text.split("\n"),
     invalidate: () => {},
   };
 }
