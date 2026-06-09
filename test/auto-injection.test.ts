@@ -99,7 +99,6 @@ async function main() {
 
   // Retrieve tools
   const createTool = pi.tools.find((t) => t.name === "promise-create");
-  const awaitTool = pi.tools.find((t) => t.name === "promise-block-until-complete");
   const listTool = pi.tools.find((t) => t.name === "promises-list");
   const statusTool = pi.tools.find((t) => t.name === "promise-status");
   const cancelTool = pi.tools.find((t) => t.name === "promise-cancel");
@@ -107,7 +106,7 @@ async function main() {
   const rechainTool = pi.tools.find((t) => t.name === "promise-rechain");
   const graphTool = pi.tools.find((t) => t.name === "promise-graph");
 
-  if (!createTool || !awaitTool) {
+  if (!createTool) {
     throw new Error("Required tools not registered");
   }
 
@@ -163,23 +162,7 @@ async function main() {
   }
 
   // ---- Test 2: promise-block-until-complete on completed promise returns result ----
-  console.log("═══════════════════════════════════════════");
-  console.log("Test 2: promise-block-until-complete on completed promise");
-  console.log("═══════════════════════════════════════════\n");
-
-  const awaitResult = await awaitTool.execute("call-2", { promiseId });
-  
-  if (awaitResult.details?.success) {
-    console.log("✅ promise-block-until-complete returns success:", JSON.stringify(awaitResult.details.result));
-  } else {
-    console.log("❌ promise-block-until-complete failed:", JSON.stringify(awaitResult));
-    throw new Error("promise-block-until-complete failed");
-  }
-  console.log("");
-
-  // ---- Test 3: promises-list shows completed promise ----
-  console.log("═══════════════════════════════════════════");
-  console.log("Test 3: promises-list");
+  console.log("Test 2: promises-list");
   console.log("═══════════════════════════════════════════\n");
 
   if (listTool) {
@@ -188,9 +171,9 @@ async function main() {
     console.log("");
   }
 
-  // ---- Test 4: Failure auto-injection ----
+  // ---- Test 3: Failure auto-injection ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 4: Failed command → auto-injection");
+  console.log("Test 3: Failed command → auto-injection");
   console.log("═══════════════════════════════════════════\n");
 
   const failResult = await createTool.execute("call-4", {
@@ -221,9 +204,9 @@ async function main() {
   }
   console.log("");
 
-  // ---- Test 5: promise-cancel ----
+  // ---- Test 4: promise-cancel ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 5: promise-cancel on running promise");
+  console.log("Test 4: promise-cancel on running promise");
   console.log("═══════════════════════════════════════════\n");
 
   if (cancelTool) {
@@ -250,9 +233,9 @@ async function main() {
     console.log("");
   }
 
-  // ---- Test 6: Chain commands ----
+  // ---- Test 5: Chain commands ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 6: Chained commands auto-inject both");
+  console.log("Test 5: Chained commands auto-inject both");
   console.log("═══════════════════════════════════════════\n");
 
   const chainMarker1 = join(tmpDir, "chain1.txt");
@@ -288,9 +271,9 @@ async function main() {
   }
   console.log("");
 
-  // ---- Test 7: promise-then chaining ----
+  // ---- Test 6: promise-then chaining ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 7: promise-then chains to existing promise");
+  console.log("Test 6: promise-then chains to existing promise");
   console.log("═══════════════════════════════════════════\n");
 
   if (thenTool) {
@@ -384,9 +367,9 @@ async function main() {
   }
   console.log("");
 
-  // ---- Test 8: promise-create with then + promise-then on running promise ----
+  // ---- Test 7: promise-create with then + promise-then on running promise ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 8: promise-then appends after pre-created child");
+  console.log("Test 7: promise-then appends after pre-created child");
   console.log("═══════════════════════════════════════════\n");
 
   const raceMarker1 = join(tmpDir, "race1.txt");
@@ -439,9 +422,9 @@ async function main() {
   }
   console.log("");
 
-  // ---- Test 9: promise-rechain ----
+  // ---- Test 8: promise-rechain ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 9: promise-rechain");
+  console.log("Test 8: promise-rechain");
   console.log("═══════════════════════════════════════════\n");
 
   if (rechainTool) {
@@ -509,9 +492,9 @@ async function main() {
   }
   console.log("");
 
-  // ---- Test 10: promise-graph ----
+  // ---- Test 9: promise-graph ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 10: promise-graph");
+  console.log("Test 9: promise-graph");
   console.log("═══════════════════════════════════════════\n");
 
   if (graphTool) {
@@ -556,9 +539,9 @@ async function main() {
   }
   console.log("");
 
-  // ---- Test 11: on-failure condition (skipped chain) ----
+  // ---- Test 10: on-failure condition (skipped chain) ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 11: on-failure condition (skipped chain)");
+  console.log("Test 10: on-failure condition (skipped chain)");
   console.log("═══════════════════════════════════════════\n");
 
   if (thenTool) {
@@ -605,9 +588,9 @@ async function main() {
   }
   console.log("");
 
-  // ---- Test 12: Cancel cascades to children ----
+  // ---- Test 11: Cancel cascades to children ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 12: Cancel cascades to children");
+  console.log("Test 11: Cancel cascades to children");
   console.log("═══════════════════════════════════════════\n");
 
   if (cancelTool) {
@@ -645,12 +628,12 @@ async function main() {
   }
   console.log("");
 
-  // ---- Test 13: previousResult in chains ----
+  // ---- Test 12: previousResult in chains ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 13: previousResult in chains");
+  console.log("Test 12: previousResult in chains");
   console.log("═══════════════════════════════════════════\n");
 
-  if (graphTool && statusTool && awaitTool) {
+  if (graphTool && statusTool) {
     const prevMarker1 = join(tmpDir, "prev1.txt");
     const prevMarker2 = join(tmpDir, "prev2.txt");
 
@@ -682,23 +665,15 @@ async function main() {
         console.log("✅ previousResult present on child");
         console.log("  contains output:", !!(childStatus.details.previousResult as any)?.output);
       } else {
-        console.log("⚠️ previousResult may not be visible via status — checking via block...");
-        // Try via promise-block-until-complete on the child
-        const childAwait = await awaitTool.execute("call-32", { promiseId: childId });
-        console.log("  block details:", JSON.stringify(childAwait.details));
-        if (childAwait.details?.previousResult) {
-          console.log("✅ previousResult found via promise-block-until-complete");
-        } else {
-          console.log("⚠️ previousResult not set (may not be available for pre-created children)");
-        }
+        console.log("⚠️ previousResult not visible via status for pre-created children")
       }
     }
   }
   console.log("");
 
-  // ---- Test 14: dedup — reuses existing promise with same subject ----
+  // ---- Test 13: dedup — reuses existing promise with same subject ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 14: dedup — reuses existing promise with same subject");
+  console.log("Test 13: dedup — reuses existing promise with same subject");
   console.log("═══════════════════════════════════════════\n");
 
   // Create a promise with a subject
@@ -772,9 +747,9 @@ async function main() {
   console.log("\n✅ All dedup tests passed");
   console.log("");
 
-  // ---- Test 15: replace — cancels existing and creates new ----
+  // ---- Test 14: replace — cancels existing and creates new ----
   console.log("═══════════════════════════════════════════");
-  console.log("Test 15: replace — cancels existing and creates new");
+  console.log("Test 14: replace — cancels existing and creates new");
   console.log("═══════════════════════════════════════════\n");
 
   const replaceMarker1 = join(tmpDir, "replace1.txt");
