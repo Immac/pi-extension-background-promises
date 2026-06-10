@@ -48,7 +48,9 @@ interface Component {
  * which crashes when the visible width exceeds the terminal. */
 function TextComponent(text: string): Component {
   return {
-    render: (_width: number) => text.split("\n"),
+    render: (width: number) => text.split("\n").map(line => 
+      line.length > width ? line.slice(0, Math.max(0, width - 3)) + "..." : line
+    ),
     invalidate: () => {},
   };
 }
