@@ -17,7 +17,7 @@
   },
   "scripts": {
     "validate": "tsc --noEmit --skipLibCheck",
-    "test": "npx tsx test/auto-injection.test.ts"
+    "test": "npx tsx test/auto-injection.test.ts && npx tsx test/corner-cases.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "0.75.5"
