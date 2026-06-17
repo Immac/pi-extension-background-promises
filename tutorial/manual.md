@@ -30,12 +30,11 @@ Version 1.0.0 — May 2026
 - [4. Tools Reference](#4-tools-reference)
   - [4.1 promise-create](#41-promise-create)
   - [4.2 promise-then](#42-promise-then)
-  - [4.3 promise-block-until-complete](#43-promise-block-until-complete)
-  - [4.4 promise-status](#44-promise-status)
-  - [4.5 promises-list](#45-promises-list)
-  - [4.6 promise-graph](#46-promise-graph)
-  - [4.7 promise-rechain](#47-promise-rechain)
-  - [4.8 promise-cancel](#48-promise-cancel)
+  - [4.3 promise-status](#43-promise-status)
+  - [4.4 promises-list](#44-promises-list)
+  - [4.5 promise-graph](#45-promise-graph)
+  - [4.6 promise-rechain](#46-promise-rechain)
+  - [4.7 promise-cancel](#47-promise-cancel)
 - [5. Conditional Chaining](#5-conditional-chaining)
 - [6. Failure Recovery](#6-failure-recovery)
 - [7. Chain Inspection](#7-chain-inspection)
@@ -65,7 +64,7 @@ The core philosophy: **fire a promise and keep working. Results arrive when read
 
 ## Architecture
 
-The system is a single TypeScript module (`bg-promises.ts`) that exports 8 tools. It maintains an in-memory `Map<string, BackgroundPromise>` and uses Node.js `child_process.spawn` for commands and `curl` for downloads.
+The system is a single TypeScript module (`bg-promises.ts`) that exports 7 tools. It maintains an in-memory `Map<string, BackgroundPromise>` and uses Node.js `child_process.spawn` for commands and native `fetch` for downloads.
 
 ![Basic workflow](assets/diagrams/01-basic-workflow.png)
 <div class="image-caption">Fig 1: The basic promise lifecycle — fire, keep working, auto-deliver</div>
@@ -76,16 +75,16 @@ The system is a single TypeScript module (`bg-promises.ts`) that exports 8 tools
 
 ```bash
 # Clone or navigate to the extension
-cd /home/immac/Repositories/ai_generation/tools/pi-extensions/bg-promises
+cd bg-promises
 
 # Validate TypeScript
 npm run validate     # TypeScript check — should exit cleanly with no output
 
 # Run tests
-npm test             # Integration tests — all 13 should pass
+npm test             # All tests — should pass
 
 # Install in pi
-pi install /home/immac/Repositories/ai_generation/tools/pi-extensions/bg-promises
+pi install <path-to-bg-promises>
 ```
 
 ## Your First Promise
@@ -149,7 +148,7 @@ Every promise follows a well-defined lifecycle through five states:
 | **pending** | Promise created but not yet started (pre-created children start here) |
 | **running** | Command spawned or download in progress |
 | **completed** | Exited with code 0 (command) or file downloaded (download) |
-| **failed** | Exited with non-zero code or curl error |
+| **failed** | Exited with non-zero code or fetch error |
 | **cancelled** | Explicitly cancelled by user, skipped by condition, or aborted due to parent failure |
 
 ```
@@ -167,7 +166,7 @@ When a `then` parameter is specified in `promise-create`, the child promise is *
 
 # 4. Tools Reference
 
-bg-promises provides 8 tools accessible to the LLM agent.
+bg-promises provides 7 tools accessible to the LLM agent.
 
 ## 4.1 promise-create
 
@@ -237,30 +236,7 @@ Path: preprocess (✓ completed) → train (✓ completed) → eval (○ pending
 
 <div class="tip">**Why chain after the fact**: You don't need to plan the full pipeline upfront. Start step 1, work on other things, and chain step 2 when you figure out what it should be. The chain auto-executes.</div>
 
-## 4.3 promise-block-until-complete
-
-**⚠️ Block until a promise completes.** Last resort — results auto-deliver. Prefer `promise-then` for sequencing.
-
-```
-promise-block-until-complete(
-  promiseId: "promise-123",
-  stallTimeout?: 60,              // Seconds of no progress before timeout (downloads only)
-  doneGracePeriod?: 5             // Seconds of no growth before considered done (downloads only)
-)
-```
-
-**Smart heuristics for downloads:**
-- Polls file size every second
-- Detects stalls (no growth for `stallTimeout` seconds)
-- Considers download complete after `doneGracePeriod` seconds of no growth
-
-**For commands:**
-- Polls every 500ms until the process exits
-- Returns stdout/stderr as `{ output: "..." }`
-
-<div class="warning">**Suppressed notification**: When a promise is awaited explicitly, the auto-notification is suppressed to prevent the LLM from seeing a duplicate follow-up message. The result is returned directly through the tool.</div>
-
-## 4.4 promise-status
+## 4.3 promise-status
 
 **Check promise status without blocking.** Returns the last known state.
 
@@ -284,7 +260,7 @@ promise-status(promiseId: "promise-123")
 }
 ```
 
-## 4.5 promises-list
+## 4.4 promises-list
 
 **List all tracked promises** as a chain tree showing parent-child relationships.
 
@@ -306,7 +282,7 @@ Root chains:
        └─ ✓ promise-8: test-then-step2 (command) - COMPLETED
 ```
 
-## 4.6 promise-graph
+## 4.5 promise-graph
 
 **Inspect chain relationships.** With a specific ID, shows that promise's chain. Without, shows all chains (forest view).
 
@@ -325,7 +301,7 @@ Path: env setup (✓ completed) → build (✓ completed)
 Depth: 1 | Status: completed
 ```
 
-## 4.7 promise-rechain
+## 4.6 promise-rechain
 
 **Re-attach a cancelled or failed promise's command to a different parent chain.** This avoids manually re-creating the command — `promise-rechain` copies the original command and attaches it to the new parent's chain.
 
@@ -352,7 +328,7 @@ promise-rechain(
   └─ ○ build — PENDING [on-success]  ← re-chained with same command
 ```
 
-## 4.8 promise-cancel
+## 4.7 promise-cancel
 
 **Cancel a pending or running promise.** Kills the child process with SIGTERM and cascades cancellation to all children in the chain.
 
@@ -592,7 +568,7 @@ Agent:
 ```
 bg-promises/
 ├── src/extensions/downloads-wisely/
-│   └── bg-promises.ts          # Main extension (~1760 lines)
+│   └── bg-promises.ts          # Main extension (~2690 lines)
 ├── test/
 │   └── auto-injection.test.ts  # Integration tests (~700 lines)
 ├── skills/
@@ -609,23 +585,22 @@ The test suite uses a `MockExtensionAPI` that captures sent messages instead of 
 npm test
 ```
 
-**Test coverage (13 tests):**
+**Test coverage (12 tests):**
 
 | # | Test | What it covers |
 |---|------|---------------|
 | 1 | Background command → auto-injection | Basic completion notification |
-| 2 | promise-block-until-complete on completed promise | Result retrieval after completion |
-| 3 | promises-list | Chain tree display |
-| 4 | Failed command → auto-injection | Error notification format |
-| 5 | promise-cancel on running promise | Cancellation kills process |
-| 6 | Chained commands | `then` at creation, both auto-inject |
-| 7 | promise-then on completed promise | Post-hoc chaining, multi-step chains, `on-success` condition |
-| 8 | Pre-created child + promise-then | Race condition — promise-then appends to pre-created child |
-| 9 | promise-rechain | Re-attach command to new parent |
-| 10 | promise-graph | All-chains forest + specific ID query |
-| 11 | on-failure condition | Skipped/cancelled child when condition fails |
-| 12 | Cancel cascades to children | Pre-created child cancelled with parent |
-| 13 | previousResult in chains | Parent's result propagates to child |
+| 2 | promises-list | Chain tree display |
+| 3 | Failed command → auto-injection | Error notification format |
+| 4 | promise-cancel on running promise | Cancellation kills process |
+| 5 | Chained commands | `then` at creation, both auto-inject |
+| 6 | promise-then on completed promise | Post-hoc chaining, multi-step chains, `on-success` condition |
+| 7 | Pre-created child + promise-then | Race condition — promise-then appends to pre-created child |
+| 8 | promise-rechain | Re-attach command to new parent |
+| 9 | promise-graph | All-chains forest + specific ID query |
+| 10 | on-failure condition | Skipped/cancelled child when condition fails |
+| 11 | Cancel cascades to children | Pre-created child cancelled with parent |
+| 12 | previousResult in chains | Parent's result propagates to child |
 
 **Test output:**
 ```
@@ -635,7 +610,7 @@ SUMMARY
 
 Total sentMessages (promise-completion): 23
 Total sentMessages (all): 23
-Tools tested: promise-create, promise-block-until-complete, promise-status,
+Tools tested: promise-create, promise-status,
               promises-list, promise-graph, promise-rechain,
               promise-cancel, promise-then
 
@@ -650,9 +625,6 @@ npm run validate
 ```
 
 # 11. FAQ
-
-**Q: When should I use promise-block-until-complete instead of promise-then?**
-A: Almost never. `promise-block-until-complete` blocks — you can't do other work while waiting. Use `promise-then` to chain, which lets you keep working while the chain executes. Only use `promise-block-until-complete` when you absolutely must have the result to continue and have no other work to do.
 
 **Q: What happens if I call promise-then on a cancelled promise?**
 A: The tool returns an error: "Cannot chain to cancelled promise". Use `promise-rechain` to retry the cancelled step on a different parent.
@@ -670,7 +642,7 @@ A: All running/pending promises are cancelled with reason "pi exited — session
 A: Pre-created children are created immediately when `promise-create` is called with a `then` parameter. They exist as concrete promise objects with status `pending`. This eliminates the race condition where `promise-then` could overwrite the parent's `thenCommand` before the child is materialized.
 
 **Q: Do downloads show progress?**
-A: Yes — the status bar shows percentage and downloaded size for downloads with known Content-Length. The `promise-block-until-complete` tool uses smart stall detection for downloads.
+A: Yes — the status bar shows percentage and downloaded size for downloads with known Content-Length.
 
 **Q: Is there a limit on chain length?**
 A: No — chains can be arbitrarily long. Each `promise-then` appends to the terminal. However, very long chains should be broken into logical segments for manageability.
